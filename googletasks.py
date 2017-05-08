@@ -23,15 +23,15 @@ from oauth2client.file import Storage
 import datetime
 
 WORKDIR = str(XDG_DATA_HOME.subdir(('zim', 'plugins')))
-CACHEFILE = WORKDIR + "/googletasks2zim.cache"
+CACHEFILE = WORKDIR + "/googletasks.cache"
 
-logger = logging.getLogger('zim.plugins.instantsearch')
-class Googletasks2zimPlugin(PluginClass):
+logger = logging.getLogger('zim.plugins.googletasks')
+class GoogletasksPlugin(PluginClass):
     
     plugin_info = {
-        'name': _('Google Tasks 2 Zim'),
+        'name': _('Google Tasks'),
         'description': _('''\
-Connects to your default Google Tasks lists. Append today's tasks to your Home file. Every task should be imported only once.
+Connects to your default Google Tasks lists. Append today's tasks in the middle of your Home file. At first run, it appends today's tasks; next, it'll append new tasks added since last synchronisation. Every task should be imported only once, unless it's changed.
 (V0.8)
 '''),
         'author': "Edvard Rejthar"        
@@ -60,7 +60,7 @@ class GoogletasksWindow(WindowExtension):
     <menubar name='menubar'>
             <menu action='tools_menu'>
                     <placeholder name='plugin_items'>
-                            <menuitem action='googletasks'/>
+                            <menuitem action='update_tasks'/>
                     </placeholder>
             </menu>
     </menubar>
@@ -72,7 +72,7 @@ class GoogletasksWindow(WindowExtension):
         
 
     @action(_('_Update from Google Tasks'), accelerator='<ctrl><shift>g') # T: menu item
-    def googletasks(self):        
+    def update_tasks(self):        
         #import ipdb; ipdb.set_trace()
         Googletasks().fetch(window = self.window)
         
@@ -104,19 +104,18 @@ class Googletasks(object):
                                     dueMin = dueMin + "00:00:00.000Z").execute()
         items = results.get('items', [])
         if not items:
-            logger.info('********** No task lists found.')
+            logger.info('No task lists found.')
             return
         else:
             text = ""
-            logger.info('**********  Task lists added.')            
+            logger.info('Task lists added.')            
             for item in items:
-                if item["id"] in self.recentItemIds:
+                if item["etag"] in self.recentItemIds:		 
                     if dateutil.parser.parse(item["due"]).date() >= now.date():
                         self.itemIds.add(item['id'])                        
-                    logger.debug('Skipping {}.'.format(item['title']))
-                    #import ipdb; ipdb.set_trace()
-                    continue
-                self.itemIds.add(item['id'])
+                    logger.debug('Skipping {}.'.format(item['title']))                    
+                    continue                
+                self.itemIds.add(item["etag"])
                 text += '[ ] {0}{1}\n'.format(item['title'], ("\n\t" + item['notes']) if "notes" in item else "")                    
             if text.strip() != "":
                 text += "\n"
@@ -132,7 +131,7 @@ class Googletasks(object):
             notebook = window.ui.notebook
             
         # Insert tasks string into page        
-        hp = notebook.get_page(Path("holuba")) # XXX notebook.get_home_page()        
+        hp = notebook.get_home_page() # Xnotebook.get_page(Path("holuba"))
                     
         #import ipdb; ipdb.set_trace()
         counter = 1
@@ -173,13 +172,13 @@ class Googletasks(object):
             Credentials, the obtained credential.
         """                
         SCOPES = 'https://www.googleapis.com/auth/tasks.readonly' # If modifying these scopes, delete your previously saved credentials
-        CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks2zim_client_id.json')
+        CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
         APPLICATION_NAME = 'googletasks2zim'
 
         if not os.path.isfile(CLIENT_SECRET_FILE):
             quit(Googletasks2zimPlugin.plugin_info["name"] + "CLIENT_SECRET_FILE not found")
             
-        credential_path = os.path.join(WORKDIR, 'googletasks2zim.json')    
+        credential_path = os.path.join(WORKDIR, 'googletasks_oauth.json')    
 
         store = Storage(credential_path)
         credentials = store.get()
