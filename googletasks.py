@@ -128,6 +128,8 @@ class Googletasks(object):
         
         
         text = self._get_new_items()
+        if not text:
+            return
             
         if not notebook and window:
             notebook = window.ui.notebook
