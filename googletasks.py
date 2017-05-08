@@ -110,9 +110,11 @@ class Googletasks(object):
             text = ""
             logger.info('Task lists added.')            
             for item in items:
+                print(item["title"], item["etag"], "skipping: " + str(item["etag"] in self.recentItemIds),dateutil.parser.parse(item["due"]).date())
                 if item["etag"] in self.recentItemIds:		 
                     if dateutil.parser.parse(item["due"]).date() >= now.date():
-                        self.itemIds.add(item['id'])                        
+                        print("ADDED")
+                        self.itemIds.add(item["etag"])
                     logger.debug('Skipping {}.'.format(item['title']))                    
                     continue                
                 self.itemIds.add(item["etag"])
