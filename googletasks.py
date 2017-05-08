@@ -25,6 +25,10 @@ import datetime
 WORKDIR = str(XDG_DATA_HOME.subdir(('zim', 'plugins')))
 CACHEFILE = WORKDIR + "/googletasks.cache"
 
+OBJECT_TYPE = "googletasks"
+
+from zim.objectmanager import ObjectManager, CustomObjectClass
+import ipdb
 logger = logging.getLogger('zim.plugins.googletasks')
 class GoogletasksPlugin(PluginClass):
     
@@ -34,8 +38,41 @@ class GoogletasksPlugin(PluginClass):
 Connects to your default Google Tasks lists. Append today's tasks in the middle of your Home file. At first run, it appends today's tasks; next, it'll append new tasks added since last synchronisation. Every task should be imported only once, unless it's changed.
 (V0.8)
 '''),
-        'author': "Edvard Rejthar"        
-    }
+        'author': "Edvard Rejthar",
+        'object_types': (OBJECT_TYPE,)
+	  
+    }    
+    def __init__(self, config=None):
+	print("*********** PLUGIN START")
+	PluginClass.__init__(self, config)	
+	ObjectManager.register_object(OBJECT_TYPE, self.create_object) # register the plugin in the main init so it works for a non-gui export
+	#self.connectto(self.preferences, 'changed', self.on_preferences_changed)
+	
+    def create_object(self, attrib, text):
+	'''Factory method for SourceViewObject objects'''
+	print("***** CREATING")
+	#ipdb.set_trace()
+	obj = GoogletasksViewObject(attrib, text)
+	return obj
+      
+      
+from zim.gui.objectmanager import CustomObjectWidget
+class GoogleTasksWidget(CustomObjectWidget):
+  def __init__(self, buffer):
+		CustomObjectWidget.__init__(self)			
+		#ipdb.set_trace()
+		self.vbox.hide()
+
+class GoogletasksViewObject(CustomObjectClass):
+    def get_data(self):
+      return "test"    
+        
+    def get_widget(self):	 
+	#ipdb.set_trace()
+	widget = GoogleTasksWidget(self)
+	#self._widgets.add(widget)
+	return widget
+
             
 
 class GoogletasksCommand(NotebookCommand):
@@ -59,9 +96,11 @@ class GoogletasksWindow(WindowExtension):
     <ui>
     <menubar name='menubar'>
             <menu action='tools_menu'>
+                <menu action='googletasks_menu'>
                     <placeholder name='plugin_items'>
-                            <menuitem action='update_tasks'/>
+                            <menuitem action='update_tasks'/>                            
                     </placeholder>
+                </menu>        
             </menu>
     </menubar>
     </ui>
@@ -69,7 +108,10 @@ class GoogletasksWindow(WindowExtension):
 
 
     gui = "";
-        
+    
+    @action(_('Google Tasks menu')) # T: menu item
+    def googletasks_menu(self):
+        pass
 
     @action(_('_Update from Google Tasks'), accelerator='<ctrl><shift>g') # T: menu item
     def update_tasks(self):        
@@ -85,7 +127,7 @@ class Googletasks(object):
         credentials = self.get_credentials()
         http = credentials.authorize(httplib2.Http())
         service = discovery.build('tasks', 'v1', http=http)
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now()
         today = now.isoformat()[:11]
         
         if os.path.isfile(CACHEFILE):
@@ -110,15 +152,17 @@ class Googletasks(object):
             text = ""
             logger.info('Task lists added.')            
             for item in items:
-                print(item["title"], item["etag"], "skipping: " + str(item["etag"] in self.recentItemIds),dateutil.parser.parse(item["due"]).date())
+	        #ipdb.set_trace()
+                #print(item["title"], item["etag"], item["id"], "skipping: " + str(item["etag"] in self.recentItemIds),dateutil.parser.parse(item["due"]).date())
                 if item["etag"] in self.recentItemIds:		 
                     if dateutil.parser.parse(item["due"]).date() >= now.date():
                         print("ADDED")
                         self.itemIds.add(item["etag"])
                     logger.debug('Skipping {}.'.format(item['title']))                    
-                    continue                
+                    #continue                
                 self.itemIds.add(item["etag"])
-                text += '[ ] {0}{1}\n'.format(item['title'], ("\n\t" + item['notes']) if "notes" in item else "")                    
+                print(item)
+                text += '[ ] [[{}|{}]] {}{}\n'.format(item["selfLink"], u"\u270b", item['title'], ("\n\t" + item['notes']) if "notes" in item else "")                    
             if text.strip() != "":
                 text += "\n"
         return text
@@ -139,7 +183,7 @@ class Googletasks(object):
                     
         #import ipdb; ipdb.set_trace()
         counter = 1
-        contents = []            
+        contents = []                   
         for line in hp.dump("wiki"):
             contents.append(line)
             if line.strip() == "":
@@ -156,6 +200,7 @@ class Googletasks(object):
                 i = buffer.get_insert_iter()
                 bounds = [i.get_offset()] * 2
             
+        
         hp.parse('wiki', "".join(contents))
         notebook.store_page(hp)
         if bounds:            
