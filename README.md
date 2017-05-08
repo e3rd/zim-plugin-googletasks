@@ -14,4 +14,4 @@ If you want to synchronise automatically, I recommend using anacron. By using th
 
 
 ## One image for hundred words
-[Demonstration](example.png)
+![Demonstration](example.png?raw=true)
