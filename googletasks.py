@@ -174,10 +174,11 @@ class GoogletasksWindow(WindowExtension):
         
         # a text is selected
         if buffer.get_selection_bounds():
-            #ipdb.set_trace()
-            text = buffer.get_text(*buffer.get_selection_bounds()).split("\n", 1)            
-            title, selflink = self.controller.getCut(text[0])
-            notes="".join(text[1:]) 
+            #ipdb.set_trace()            
+            text, selflink = self.controller.cutTask(buffer.get_text(*buffer.get_selection_bounds()))
+            text = text.split("\n", 1)
+            title = text[0]
+            notes="".join(text[1:])             
             self.add_new_task(title = title, notes = notes, selflink = selflink)
             # XX possibility to safely cut the text, after successful posting to server. (Or it may be cut now and put back in case of an error?)
             return
@@ -242,11 +243,13 @@ class GoogletasksWindow(WindowExtension):
       
 
 class GoogletasksNewtaskDialog(Dialog):
-    def do_response_ok(self):
-        self.destroy() # immediately close (so that we wont hit Ok twice)
-        #ipdb.set_trace()                
+    def do_response_ok(self):        
         o = self.controller.inputNotes.get_buffer()
-        self.controller.add_new_task(self.controller.inputTitle.get_text(), notes = o.get_text(*o.get_bounds()))                
+        notes = o.get_text(*o.get_bounds())        
+        title = self.controller.inputTitle.get_text()
+        self.destroy() # immediately close (so that we wont hit Ok twice)        
+        self.controller.add_new_task(title = title, notes = notes)
+        return True
     
     def setController(self,controller):
         self.controller = controller
@@ -265,9 +268,10 @@ class Googletasks(object):
         self.page = self.notebook.get_home_page()
         print("settings page", self.page)
     
-    def cutTask(text):
+    def cutTask(self, text):
         """ The task selfLink previously inserted is found and cut from text. """        
         m = linkIconRe.search(text)
+        #ipdb.set_trace()
         if m and len(m.groups()) == 3:            
             selflink = m.group(1)
             text = m.group(0) + m.group(2)
@@ -278,6 +282,7 @@ class Googletasks(object):
     def add_new_task(self, title, notes = "", due = None):
         if not due:
             due = self.getTime(addDays = 1, morning = True)
+        #ipdb.set_trace()
         service = GoogleCalendarApi().getService(write_access = True)        
         task = {'title': title,
             'notes': notes,
@@ -288,20 +293,20 @@ class Googletasks(object):
         print(result['id'])
         
     def getTime(self, addDays = 0, now = False, dateonly = False, morning = False, midnight = False, lastsec = False):
-        now = datetime.datetime.now()
+        dtnow = datetime.datetime.now()        
         if now:
-            return now
+            return dtnow
         if addDays:
-            now += datetime.timedelta(addDays, 0)
+            dtnow += datetime.timedelta(addDays, 0)
         if dateonly:
-            return now.isoformat()[:11]
+            return dtnow.isoformat()[:11]
         if morning:
-            return now.isoformat()[:11]+"08:00:00.000Z"
+            return dtnow.isoformat()[:11]+"08:00:00.000Z"
         if midnight:
-            return now.isoformat()[:11]+"23:59:59.999Z"
-        if lastsec:
-            return now.isoformat()[:11]+"23:59:59.999Z"
-        return now.isoformat()
+            return dtnow.isoformat()[:11]+"23:59:59.999Z"
+        if lastsec:            
+            return dtnow.isoformat()[:11]+"23:59:59.999Z"
+        return dtnow.isoformat()
         
     
     def _get_new_items(self):        
@@ -320,8 +325,7 @@ class Googletasks(object):
                                     tasklist = "@default",
                                     showCompleted = False,
                                     dueMin = dueMin + "00:00:00.000Z",
-                                    dueMax = self.getTime(lastsec = True),
-                                    ).execute()
+                                    dueMax = self.getTime(lastsec = True)).execute()
         items = results.get('items', [])
         if not items:
             logger.info('No task lists found.')
@@ -336,7 +340,7 @@ class Googletasks(object):
                     if dateutil.parser.parse(item["due"]).date() >= self.getTime(now = True).date():                        
                         self.itemIds.add(item["etag"])
                     logger.debug('Skipping {}.'.format(item['title']))                    
-                    #continue XXX
+                    continue #XXX
                 self.itemIds.add(item["etag"])
                 print(item)
                 text += '[ ] [[{}|{}]] {}{}\n'.format(item["selfLink"], LINKICON, item['title'], ("\n\t" + item['notes']) if "notes" in item else "")                    
