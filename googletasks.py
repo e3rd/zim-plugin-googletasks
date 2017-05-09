@@ -35,7 +35,7 @@ import gtk
 from zim.gui.widgets import Dialog
 from zim.gui.widgets import InputEntry, PageEntry
 import re
-linkIconRe = re.compile('(.*)\[\[([^|]*)\|'+LINKICON+'\]\](.*)')
+
 
 logger = logging.getLogger('zim.plugins.googletasks')
 
@@ -45,6 +45,7 @@ CACHEFILE = WORKDIR + "/googletasks.cache"
 CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 APPLICATION_NAME = 'googletasks2zim'
 LINKICON = u"\u270b"
+linkIconRe = re.compile('(.*)\[\[([^|]*)\|'+LINKICON+'\]\](.*)')
 
 # initial check
 if not os.path.isfile(CLIENT_SECRET_FILE):
@@ -173,7 +174,7 @@ class GoogletasksWindow(WindowExtension):
         
         # a text is selected
         if buffer.get_selection_bounds():
-            ipdb.set_trace()
+            #ipdb.set_trace()
             text = buffer.get_text(*buffer.get_selection_bounds()).split("\n", 1)            
             title, selflink = self.controller.getCut(text[0])
             notes="".join(text[1:]) 
