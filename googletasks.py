@@ -44,8 +44,9 @@ WORKDIR = str(XDG_DATA_HOME.subdir(('zim', 'plugins')))
 CACHEFILE = WORKDIR + "/googletasks.cache"
 CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 APPLICATION_NAME = 'googletasks2zim'
-LINKICON = u"\u270b"
-linkIconRe = re.compile('(.*)\[\[([^|]*)\|'+LINKICON+'\]\](.*)')
+TASKANCHOR_SYMBOL = u"\u270b"
+#linkIconRe = re.compile('(.*)\[\[([^|]*)\|'+LINKICON+'\]\](.*)')
+taskAnchorRe = re.compile(' {} '.format(TASKANCHOR_SYMBOL.encode("utf-8")))
 
 # initial check
 if not os.path.isfile(CLIENT_SECRET_FILE):
@@ -126,7 +127,7 @@ class GoogleCalendarApi(object):
             argv = sys.argv 
             sys.argv = sys.argv[:1] # tools.run_flow unfortunately parses arguments and would die from any zim args
             credentials = tools.run_flow(flow, store)
-            logger.info('Storing credentials to ' + self.credential_path)
+            self.info('Storing credentials to ' + self.credential_path)
             sys.argv = argv 
         return credentials
 
@@ -170,21 +171,28 @@ class GoogletasksWindow(WindowExtension):
     @action(_('_Task from selection...'), accelerator='<ctrl><alt><shift>g') # T: menu item    
     def send_as_task(self): # cut current text and send to tasks                
         buffer = self.window.pageview.view.get_buffer()
-        
-        
+                
         # a text is selected
         if buffer.get_selection_bounds():
-            #ipdb.set_trace()            
-            text, selflink = self.controller.cutTask(buffer.get_text(*buffer.get_selection_bounds()))
+            taskid = None
+            text = buffer.get_text(*buffer.get_selection_bounds())
+            task_anchor_pos = text.find(TASKANCHOR_SYMBOL.encode("utf-8"))
+            if task_anchor_pos:
+                text = taskAnchorRe.sub("", text)
+                offset = task_anchor_pos + 1 + buffer.get_selection_bounds()[0].get_offset() # the +1 is because of a charset mystery
+                linkdata = buffer.get_link_data(buffer.get_iter_at_offset(offset))
+                if linkdata:
+                    taskid = linkdata["href"]
+            
             text = text.split("\n", 1)
             title = text[0]
             notes="".join(text[1:])             
-            self.add_new_task(title = title, notes = notes, selflink = selflink)
+            self.add_new_task(title = title, notes = notes, taskid = taskid)
             # XX possibility to safely cut the text, after successful posting to server. (Or it may be cut now and put back in case of an error?)
             return
             
         # XX
-        logger.warning("Not yet implemented without selecting text")
+        logger.warning("Not yet implemented without selecting text. This should identify the task starting the line.")
         return                 
         # none text is selected - identify where the task begins and ends
         if not bounds:
@@ -198,12 +206,12 @@ class GoogletasksWindow(WindowExtension):
             
         
     @action(_('_Add new task...')) # T: menu item
-    def add_new_task(self, title = None, notes = None, due = None, selflink = None):        
+    def add_new_task(self, title = None, notes = None, due = None, taskid = None):
         self.gui = GoogletasksNewtaskDialog(self.window.ui, _('Search'),  defaultwindowsize=(300, -1))
         self.gui.setController(self.controller)
         self.gui.resize(300, 100) # reset size
         
-        self.labelObject = gtk.Label(('Send to Google tasks'))
+        self.labelObject = gtk.Label(('Update Google task') if taskid else ('Create Google tasks'))
         self.labelObject.set_usize(300, -1)        
         self.gui.vbox.pack_start(self.labelObject, False)                
         
@@ -211,10 +219,8 @@ class GoogletasksWindow(WindowExtension):
         self.controller.inputNotes = gtk.TextView()
         self.gui.vbox.pack_start(self.controller.inputTitle, False)
         self.gui.vbox.pack_start(self.controller.inputNotes, False)
-        
-        if selflink:
-            # XXX WE ARE HERE:
-            print("YESSSSSS, selflink is there!", selflink)
+
+        self.gui.taskid = taskid
         
         if title:
             self.controller.inputTitle.set_text(title)
@@ -248,7 +254,7 @@ class GoogletasksNewtaskDialog(Dialog):
         notes = o.get_text(*o.get_bounds())        
         title = self.controller.inputTitle.get_text()
         self.destroy() # immediately close (so that we wont hit Ok twice)        
-        self.controller.add_new_task(title = title, notes = notes)
+        self.controller.submit_task(title = title, notes = notes, taskid = self.taskid)
         return True
     
     def setController(self,controller):
@@ -268,29 +274,40 @@ class Googletasks(object):
         self.page = self.notebook.get_home_page()
         print("settings page", self.page)
     
-    def cutTask(self, text):
-        """ The task selfLink previously inserted is found and cut from text. """        
-        m = linkIconRe.search(text)
-        #ipdb.set_trace()
-        if m and len(m.groups()) == 3:            
-            selflink = m.group(1)
-            text = m.group(0) + m.group(2)
-            return text, selflink
-                    
-        return text, None
+        """def cutTask(self, text):
+            " "" The task id previously inserted is found and cut from text. "" "
+            m = taskAnchorRe.search(text)
+            #ipdb.set_trace()
+            if m and len(m.groups()) == 3:
+                selflink = m.group(1)
+                text = m.group(0) + m.group(2)
+                return text, selflink
+
+            return text, None"""            
     
-    def add_new_task(self, title, notes = "", due = None):
+    def submit_task(self, title, notes = "", due = None, taskid = None):
         if not due:
             due = self.getTime(addDays = 1, morning = True)
-        #ipdb.set_trace()
+        
         service = GoogleCalendarApi().getService(write_access = True)        
         task = {'title': title,
             'notes': notes,
             'due': due
             }
 
-        result = service.tasks().insert(tasklist='@default', body=task).execute()
-        print(result['id'])
+        try:
+            if taskid:
+                result = service.tasks().patch(tasklist='@default', task = taskid, body=task).execute()
+                self.info("Task '{}' updated.".format(title))
+            else:
+                result = service.tasks().insert(tasklist='@default', body=task).execute()
+                self.info("Task '{}' created.".format(title))
+        except:
+            self.info('Error in communication with Google Tasks')
+            return False
+        return True
+
+        #print(result['id'])
         
     def getTime(self, addDays = 0, now = False, dateonly = False, morning = False, midnight = False, lastsec = False):
         dtnow = datetime.datetime.now()        
@@ -308,7 +325,11 @@ class Googletasks(object):
             return dtnow.isoformat()[:11]+"23:59:59.999Z"
         return dtnow.isoformat()
         
-    
+    def info(self, text):
+        logger.info(text)
+        if self.window:
+            self.window.statusbar.push(0, text)
+
     def _get_new_items(self):        
         service = GoogleCalendarApi().getService()
         
@@ -328,7 +349,7 @@ class Googletasks(object):
                                     dueMax = self.getTime(lastsec = True)).execute()
         items = results.get('items', [])
         if not items:
-            logger.info('No task lists found.')
+            self.info('No task lists found.')
             return
         else:
             text = ""
@@ -343,7 +364,7 @@ class Googletasks(object):
                     continue #XXX
                 self.itemIds.add(item["etag"])
                 print(item)
-                text += '[ ] [[{}|{}]] {}{}\n'.format(item["selfLink"], LINKICON, item['title'], ("\n\t" + item['notes']) if "notes" in item else "")                    
+                text += '[ ] [[{}|{}]] {}{}\n'.format(item["id"], TASKANCHOR_SYMBOL, item['title'], ("\n\t" + item['notes']) if "notes" in item else "")
             if text.strip() != "":
                 text += "\n"
         return text
