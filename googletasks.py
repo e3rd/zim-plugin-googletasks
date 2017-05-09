@@ -84,7 +84,7 @@ class GoogletasksCommand(NotebookCommand):
 	reload = (lambda: ui.reload_page()) if ui else lambda: None
 	ntb, _ = self.build_notebook()
 	reload() # save current user's work, if zim's open
-	Googletasks(notebook = ntb).fetch() # add new lines
+	GoogletasksController(notebook = ntb).fetch() # add new lines
 	reload() # save new lines            
 
 class GoogleCalendarApi(object):
@@ -166,7 +166,7 @@ class GoogletasksWindow(WindowExtension):
         
     def __init__(self, *args, **kwargs):                
         WindowExtension.__init__(self,*args, **kwargs) #super(WindowExtension, self).__init__(*args, **kwargs)        
-        self.controller = Googletasks(window = self.window)
+        self.controller = GoogletasksController(window = self.window)
                     
     @action(_('_Task from selection...'), accelerator='<ctrl><alt><shift>g') # T: menu item    
     def send_as_task(self): # cut current text and send to tasks                
@@ -174,20 +174,8 @@ class GoogletasksWindow(WindowExtension):
                 
         # a text is selected
         if buffer.get_selection_bounds():
-            taskid = None
-            text = buffer.get_text(*buffer.get_selection_bounds())
-            task_anchor_pos = text.find(TASKANCHOR_SYMBOL.encode("utf-8"))
-            if task_anchor_pos:
-                text = taskAnchorRe.sub("", text)
-                offset = task_anchor_pos + 1 + buffer.get_selection_bounds()[0].get_offset() # the +1 is because of a charset mystery
-                linkdata = buffer.get_link_data(buffer.get_iter_at_offset(offset))
-                if linkdata:
-                    taskid = linkdata["href"]
-            
-            text = text.split("\n", 1)
-            title = text[0]
-            notes="".join(text[1:])             
-            self.add_new_task(title = title, notes = notes, taskid = taskid)
+            task = self.controller.readTaskFromSelection(buffer)
+            self.add_new_task(task = task)
             # XX possibility to safely cut the text, after successful posting to server. (Or it may be cut now and put back in case of an error?)
             return
             
@@ -206,7 +194,7 @@ class GoogletasksWindow(WindowExtension):
             
         
     @action(_('_Add new task...')) # T: menu item
-    def add_new_task(self, title = None, notes = None, due = None, taskid = None):
+    def add_new_task(self, task = {}):
         self.gui = GoogletasksNewtaskDialog(self.window.ui, _('Search'),  defaultwindowsize=(300, -1))
         self.gui.setController(self.controller)
         self.gui.resize(300, 100) # reset size
@@ -220,7 +208,7 @@ class GoogletasksWindow(WindowExtension):
         self.gui.vbox.pack_start(self.controller.inputTitle, False)
         self.gui.vbox.pack_start(self.controller.inputNotes, False)
 
-        self.gui.taskid = taskid
+        self.gui.task = task
         
         if title:
             self.controller.inputTitle.set_text(title)
@@ -242,27 +230,39 @@ class GoogletasksWindow(WindowExtension):
         GoogleCalendarApi().getService(write_access = True)       
 
     @action(_('_Import new tasks'), accelerator='<ctrl><alt>g') # T: menu item
-    def import_tasks(self):        
-        #import ipdb; ipdb.set_trace()
-        self.controller.fetch()
-      
-      
+    def import_tasks(self):                
+        self.controller.fetch()            
 
 class GoogletasksNewtaskDialog(Dialog):
+    def _loadTask(self):
+        try:
+            o = self.controller.inputNotes.get_buffer()
+            self.task["notes"] = o.get_text(*o.get_bounds())
+            self.task["title"] = self.controller.inputTitle.get_text()
+        except:
+            pass
+
     def do_response_ok(self):        
-        o = self.controller.inputNotes.get_buffer()
-        notes = o.get_text(*o.get_bounds())        
-        title = self.controller.inputTitle.get_text()
+        self._loadTask()
         self.destroy() # immediately close (so that we wont hit Ok twice)        
-        self.controller.submit_task(title = title, notes = notes, taskid = self.taskid)
+        if not self.controller.submit_task(task = self.task):
+            print("*** DALSI" ,title)
+            self.do_response_cancel(self)
         return True
-    
+
+    def do_response_cancel(self):
+        """ something failed, restore original text in the zim-page """        
+        self._loadTask()
+        text = self.controller.getTaskText(self.task)
+
+        buffer = self.controller.window.pageview.view.get_buffer()
+        buffer.insert(buffer.get_insert_iter(), text)
+
     def setController(self,controller):
         self.controller = controller
-
           
 
-class Googletasks(object):    
+class GoogletasksController(object):
   
     def __init__(self, window = None, notebook = None):      
         self.window = window
@@ -285,19 +285,15 @@ class Googletasks(object):
 
             return text, None"""            
     
-    def submit_task(self, title, notes = "", due = None, taskid = None):
-        if not due:
-            due = self.getTime(addDays = 1, morning = True)
+    def submit_task(self, task = {}):
+        if not task["due"]:
+            task["due"] = self.getTime(addDays = 1, morning = True)
         
-        service = GoogleCalendarApi().getService(write_access = True)        
-        task = {'title': title,
-            'notes': notes,
-            'due': due
-            }
+        service = GoogleCalendarApi().getService(write_access = True)                
 
         try:
-            if taskid:
-                result = service.tasks().patch(tasklist='@default', task = taskid, body=task).execute()
+            if task["id"]:
+                result = service.tasks().patch(tasklist='@default', task = task["id"], body=task).execute()
                 self.info("Task '{}' updated.".format(title))
             else:
                 result = service.tasks().insert(tasklist='@default', body=task).execute()
@@ -305,9 +301,7 @@ class Googletasks(object):
         except:
             self.info('Error in communication with Google Tasks')
             return False
-        return True
-
-        #print(result['id'])
+        return True        
         
     def getTime(self, addDays = 0, now = False, dateonly = False, morning = False, midnight = False, lastsec = False):
         dtnow = datetime.datetime.now()        
@@ -364,10 +358,31 @@ class Googletasks(object):
                     continue #XXX
                 self.itemIds.add(item["etag"])
                 print(item)
-                text += '[ ] [[{}|{}]] {}{}\n'.format(item["id"], TASKANCHOR_SYMBOL, item['title'], ("\n\t" + item['notes']) if "notes" in item else "")
+                text += self.getTaskText(item)
             if text.strip() != "":
                 text += "\n"
         return text
+
+    def getTaskText(self, task):
+        return '[ ] [[{}|{}]] {}{}\n'.format(task["id"], TASKANCHOR_SYMBOL, task['title'], ("\n\t" + task['notes']) if "notes" in task else "")
+
+    def readTaskFromSelection(self, buffer):
+        task = {"id": None, "title": None, "notes": None}
+
+        text = buffer.get_text(*buffer.get_selection_bounds())
+        task_anchor_pos = text.find(TASKANCHOR_SYMBOL.encode("utf-8"))
+        if task_anchor_pos:
+            text = taskAnchorRe.sub("", text)
+            offset = task_anchor_pos + 1 + buffer.get_selection_bounds()[0].get_offset() # the +1 is because of a charset mystery
+            linkdata = buffer.get_link_data(buffer.get_iter_at_offset(offset))
+            if linkdata:
+                task["id"] = linkdata["href"]
+        buffer.delete(*buffer.get_selection_bounds())
+
+        text = text.split("\n", 1)
+        task["title"] = text[0]
+        task["notes"]="".join(text[1:])
+        return task
     
     def fetch(self):
         self.itemIds = set()        
