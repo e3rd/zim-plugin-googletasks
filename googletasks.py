@@ -62,7 +62,9 @@ class GoogletasksPlugin(PluginClass):
         'name': _('Google Tasks'),
         'description': _('''\
 Connects to your default Google Tasks lists. Append today's tasks in the middle of your Home file. At first run, it appends today's tasks; next, it'll append new tasks added since last synchronisation. Every task should be imported only once, unless it's changed.
-(V0.9)
+
+See https://github.com/e3rd/zim-plugin-googletasks for more info.
+(V1.0)
 '''),
         'author': "Edvard Rejthar",    	  
     }          
