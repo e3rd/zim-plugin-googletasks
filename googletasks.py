@@ -12,13 +12,14 @@ import dateutil.parser
 from collections import defaultdict
 
 from zim.actions import action
-from zim.plugins import PluginClass
-from zim.plugins import WindowExtension
-from zim.plugins import extends
 from zim.config import XDG_DATA_HOME
+from zim.formats.wiki import Parser
 from zim.notebook import Path
 from zim.main import NotebookCommand
 from zim.ipc import start_server_if_not_running, ServerProxy
+from zim.plugins import PluginClass
+from zim.plugins import WindowExtension
+from zim.plugins import extends
 
 from apiclient import discovery
 from oauth2client import client
@@ -169,29 +170,40 @@ class GoogletasksWindow(WindowExtension):
         self.controller = GoogletasksController(window = self.window)
                     
     @action(_('_Task from selection...'), accelerator='<ctrl><alt><shift>g') # T: menu item    
-    def send_as_task(self): # cut current text and send to tasks                
-        buffer = self.window.pageview.view.get_buffer()
-                
-        # a text is selected
-        if buffer.get_selection_bounds():
+    def send_as_task(self): # cut current text and send to tasks             
+        buffer = self.window.pageview.view.get_buffer()                        
+        if not buffer.get_selection_bounds():            
+            # no text is selected yet - we try to detect and autoselect a task
+            def readline(lineI): # this crazy construct just reads a line in page
+                textiter = buffer.get_iter_at_line(lineI)
+                start = buffer.get_iter_at_offset(textiter.get_offset())
+                if textiter.forward_to_line_end():
+                    end = buffer.get_iter_at_offset(textiter.get_offset())
+                else:
+                    end = start                
+                return buffer.get_slice(start,end)
+                        
+            lineI = buffer.get_insert_iter().get_line()                          
+            startiter = buffer.get_iter_at_line(lineI)            
+
+            #ipdb.set_trace()
+            while True:
+                lineI += 1
+                s = None
+                try:
+                    s = readline(lineI)
+                finally:                    
+                    if not s or not s.strip() or TASKANCHOR_SYMBOL.encode("utf-8") in s: # not s.startswith("\t") 
+                        lineI -= 1
+                        break                
+            
+            enditer = buffer.get_iter_at_line(lineI)
+            enditer.forward_to_line_end()
+            buffer.select_range(startiter, enditer)
+            
+        if buffer.get_selection_bounds(): # a task is selected
             task = self.controller.readTaskFromSelection(buffer)
-            self.add_new_task(task = task)
-            # XX possibility to safely cut the text, after successful posting to server. (Or it may be cut now and put back in case of an error?)
-            return
-            
-        # XX
-        logger.warning("Not yet implemented without selecting text. This should identify the task starting the line.")
-        return                 
-        # none text is selected - identify where the task begins and ends
-        if not bounds:
-            i = buffer.get_insert_iter() # XX how to get the line start of the current offset?
-            bounds = [i.get_offset()] * 2                        
-        #self.page.parse('wiki', "".join(contents))
-        #self.notebook.store_page(self.page)
-        #if bounds:            
-        #    buffer.select_range(buffer.get_iter_at_offset(bounds[0]), buffer.get_iter_at_offset(bounds[1]))
-                
-            
+            self.add_new_task(task = task)                    
         
     @action(_('_Add new task...')) # T: menu item
     def add_new_task(self, task = {}):
@@ -199,7 +211,7 @@ class GoogletasksWindow(WindowExtension):
         self.gui.setController(self.controller)
         self.gui.resize(300, 100) # reset size
         
-        self.labelObject = gtk.Label(('Update Google task') if taskid else ('Create Google tasks'))
+        self.labelObject = gtk.Label(('Update Google task') if "id" in task else ('Create Google tasks'))
         self.labelObject.set_usize(300, -1)        
         self.gui.vbox.pack_start(self.labelObject, False)                
         
@@ -210,13 +222,13 @@ class GoogletasksWindow(WindowExtension):
 
         self.gui.task = task
         
-        if title:
-            self.controller.inputTitle.set_text(title)
+        if "title" in task:
+            self.controller.inputTitle.set_text(task["title"])
             
-        if notes:
-            self.controller.inputNotes.get_buffer().set_text(notes)
+        if "notes" in task:
+            self.controller.inputNotes.get_buffer().set_text(task["notes"])
             
-        if due:
+        if "due" in task:
             logger.error("Not yet implemented") ##
         
         self.gui.show_all()            
@@ -236,31 +248,36 @@ class GoogletasksWindow(WindowExtension):
 class GoogletasksNewtaskDialog(Dialog):
     def _loadTask(self):
         try:
+            ipdb.set_trace()
             o = self.controller.inputNotes.get_buffer()
             self.task["notes"] = o.get_text(*o.get_bounds())
             self.task["title"] = self.controller.inputTitle.get_text()
         except:
             pass
+            
+    def do_response(self, id):
+        """ we cant use parent function because Esc is not handled as cancel """
+        if id == gtk.RESPONSE_OK:
+            self.do_response_ok()
+        else:
+            self.do_response_cancel()        
 
     def do_response_ok(self):        
         self._loadTask()
         self.destroy() # immediately close (so that we wont hit Ok twice)        
-        if not self.controller.submit_task(task = self.task):
-            print("*** DALSI" ,title)
-            self.do_response_cancel(self)
+        if not self.controller.submit_task(task = self.task):            
+            self.do_response_cancel()
         return True
 
     def do_response_cancel(self):
-        """ something failed, restore original text in the zim-page """        
-        self._loadTask()
+        """ something failed, restore original text in the zim-page """                
         text = self.controller.getTaskText(self.task)
-
         buffer = self.controller.window.pageview.view.get_buffer()
-        buffer.insert(buffer.get_insert_iter(), text)
+        buffer.insert_parsetree_at_cursor(Parser().parse(text))        
+        self.destroy()
 
     def setController(self,controller):
         self.controller = controller
-          
 
 class GoogletasksController(object):
   
@@ -272,34 +289,23 @@ class GoogletasksController(object):
                 self.notebook = self.window.ui.notebook        
         #self.page = notebook.get_page(Path(self.preferences["page"])) if self.preferences["page"] else self.notebook.get_home_page()      
         self.page = self.notebook.get_home_page()
-        print("settings page", self.page)
-    
-        """def cutTask(self, text):
-            " "" The task id previously inserted is found and cut from text. "" "
-            m = taskAnchorRe.search(text)
-            #ipdb.set_trace()
-            if m and len(m.groups()) == 3:
-                selflink = m.group(1)
-                text = m.group(0) + m.group(2)
-                return text, selflink
-
-            return text, None"""            
-    
+        logger.debug("Google tasks page: {} ".format(self.page))        
+            
     def submit_task(self, task = {}):
-        if not task["due"]:
+        if "due" not in task:
             task["due"] = self.getTime(addDays = 1, morning = True)
         
         service = GoogleCalendarApi().getService(write_access = True)                
 
         try:
-            if task["id"]:
+            if "id" in task:                                
                 result = service.tasks().patch(tasklist='@default', task = task["id"], body=task).execute()
-                self.info("Task '{}' updated.".format(title))
+                self.info("Task '{}' updated.".format(task["title"]))                                
             else:
                 result = service.tasks().insert(tasklist='@default', body=task).execute()
-                self.info("Task '{}' created.".format(title))
-        except:
-            self.info('Error in communication with Google Tasks')
+                self.info("Task '{}' created.".format(task["title"]))
+        except:                        
+            self.info('Error in communication with Google Tasks: {}'.format(sys.exc_info()[1]))            
             return False
         return True        
         
@@ -326,8 +332,7 @@ class GoogletasksController(object):
 
     def _get_new_items(self):        
         service = GoogleCalendarApi().getService()
-        
-        
+                
         if os.path.isfile(CACHEFILE):
             with open(CACHEFILE, "rb") as f:
                 self.recentItemIds = pickle.load(f)                
@@ -364,10 +369,17 @@ class GoogletasksController(object):
         return text
 
     def getTaskText(self, task):
-        return '[ ] [[{}|{}]] {}{}\n'.format(task["id"], TASKANCHOR_SYMBOL, task['title'], ("\n\t" + task['notes']) if "notes" in task else "")
+        s = "[ ] "
+        if task.get("id",""):
+            s += "[[{}|{}]] ".format(task["id"], TASKANCHOR_SYMBOL)
+        s+=task['title']
+        if task.get("notes",""):
+            s += "\n\t" + task['notes']
+        #s+="\n"
+        return s
 
     def readTaskFromSelection(self, buffer):
-        task = {"id": None, "title": None, "notes": None}
+        task = { "title": None, "notes": None}
 
         text = buffer.get_text(*buffer.get_selection_bounds())
         task_anchor_pos = text.find(TASKANCHOR_SYMBOL.encode("utf-8"))
@@ -396,7 +408,7 @@ class GoogletasksController(object):
         contents = []                   
         for line in self.page.dump("wiki"):
             contents.append(line)
-            if line.strip() == "":
+            if line.strip() == "": # ignore first empty line
                 counter -= 1
             if counter == 0:
                 contents.append(text)
