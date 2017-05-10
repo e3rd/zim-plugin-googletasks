@@ -94,7 +94,6 @@ class GoogleCalendarApi(object):
     
     @staticmethod
     def serviceObtainable(write_access = False):
-        #ipdb.set_trace()
         if write_access:
             return os.path.isfile(GoogleCalendarApi.permission_write_file)
         else:
@@ -133,6 +132,21 @@ class GoogleCalendarApi(object):
         return credentials
 
 
+
+def monkeypatch_method(cls):
+    """ decorator used for extend features of a method"""
+    def decorator(func):
+        setattr(cls, func.__name__+"_original", getattr(cls, func.__name__))
+        setattr(cls, func.__name__, func)       
+        return func
+    return decorator
+
+from zim.gui.pageview import TextBuffer
+from zim.formats import CHECKED_BOX, UNCHECKED_BOX
+
+
+        
+
 @extends('MainWindow')
 class GoogletasksWindow(WindowExtension):
     
@@ -161,37 +175,40 @@ class GoogletasksWindow(WindowExtension):
 
     gui = "";
     
-    @action(_('Google Tasks menu')) # T: menu item
+    @action(_('Google Tasks')) # T: menu item
     def googletasks_menu(self):
         pass
         
     def __init__(self, *args, **kwargs):                
         WindowExtension.__init__(self,*args, **kwargs) #super(WindowExtension, self).__init__(*args, **kwargs)        
-        self.controller = GoogletasksController(window = self.window)
+        controller = self.controller = GoogletasksController(window = self.window)
+                
+        @monkeypatch_method(TextBuffer)    
+        def set_bullet(self, row, bullet): 
+            """ overriding of pageview.py/TextBuffer/set_bullet """
+            if bullet in [CHECKED_BOX, UNCHECKED_BOX]:
+                taskid = controller.getTaskId(row)                
+                if taskid:
+                    controller.task_checked(taskid, bullet)
+            self.set_bullet_original(row, bullet)         
+    
+        
                     
-    @action(_('_Task from selection...'), accelerator='<ctrl><alt><shift>g') # T: menu item    
-    def send_as_task(self): # cut current text and send to tasks             
-        buffer = self.window.pageview.view.get_buffer()                        
+    @action(_('_Task from cursor or selection...'), accelerator='<ctrl><alt><shift>g') # T: menu item
+    def send_as_task(self):
+        """ cut current text and call send to tasks dialog """
+        buffer = self.window.pageview.view.get_buffer()
+        
         if not buffer.get_selection_bounds():            
-            # no text is selected yet - we try to detect and autoselect a task
-            def readline(lineI): # this crazy construct just reads a line in page
-                textiter = buffer.get_iter_at_line(lineI)
-                start = buffer.get_iter_at_offset(textiter.get_offset())
-                if textiter.forward_to_line_end():
-                    end = buffer.get_iter_at_offset(textiter.get_offset())
-                else:
-                    end = start                
-                return buffer.get_slice(start,end)
-                        
-            lineI = buffer.get_insert_iter().get_line()                          
+            # no text is selected yet - we try to detect and autoselect a task                                    
+            lineI = buffer.get_insert_iter().get_line()
             startiter = buffer.get_iter_at_line(lineI)            
 
-            #ipdb.set_trace()
             while True:
                 lineI += 1
                 s = None
                 try:
-                    s = readline(lineI)
+                    s = self.controller.readline(lineI)
                 finally:                    
                     if not s or not s.strip() or TASKANCHOR_SYMBOL.encode("utf-8") in s: # not s.startswith("\t") 
                         lineI -= 1
@@ -202,7 +219,7 @@ class GoogletasksWindow(WindowExtension):
             buffer.select_range(startiter, enditer)
             
         if buffer.get_selection_bounds(): # a task is selected
-            task = self.controller.readTaskFromSelection(buffer)
+            task = self.controller.readTaskFromSelection()
             self.add_new_task(task = task)                    
         
     @action(_('_Add new task...')) # T: menu item
@@ -211,7 +228,7 @@ class GoogletasksWindow(WindowExtension):
         self.gui.setController(self.controller)
         self.gui.resize(300, 100) # reset size
         
-        self.labelObject = gtk.Label(('Update Google task') if "id" in task else ('Create Google tasks'))
+        self.labelObject = gtk.Label(('Update Google task') if task.get("id","") else ('Create Google tasks'))
         self.labelObject.set_usize(300, -1)        
         self.gui.vbox.pack_start(self.labelObject, False)                
         
@@ -248,7 +265,6 @@ class GoogletasksWindow(WindowExtension):
 class GoogletasksNewtaskDialog(Dialog):
     def _loadTask(self):
         try:
-            ipdb.set_trace()
             o = self.controller.inputNotes.get_buffer()
             self.task["notes"] = o.get_text(*o.get_bounds())
             self.task["title"] = self.controller.inputTitle.get_text()
@@ -290,12 +306,29 @@ class GoogletasksController(object):
         #self.page = notebook.get_page(Path(self.preferences["page"])) if self.preferences["page"] else self.notebook.get_home_page()      
         self.page = self.notebook.get_home_page()
         logger.debug("Google tasks page: {} ".format(self.page))        
-            
+        
+    def task_checked(self, taskid, bullet):
+        service = GoogleCalendarApi().getService(write_access = True)
+        task = {"status": "completed" if bullet is CHECKED_BOX else "needsAction"}        
+        try:
+            if bullet is CHECKED_BOX: # small patch will be sufficient
+                result = service.tasks().patch(tasklist='@default', task = taskid, body=task).execute()
+            else: # we need to delete the automatically generated completed field, need to do a whole update
+                task = service.tasks().get(tasklist='@default', task = taskid).execute()
+                del task["completed"]
+                task["status"] = "needsAction"
+                result = service.tasks().update(tasklist='@default', task = taskid, body=task).execute()
+        except:                        
+            self.info('Error in communication with Google Tasks: {}'.format(sys.exc_info()[1]))            
+            return False
+        self.info('Marked as {}'.format(task["status"]))
+        return True        
+    
     def submit_task(self, task = {}):
         if "due" not in task:
             task["due"] = self.getTime(addDays = 1, morning = True)
         
-        service = GoogleCalendarApi().getService(write_access = True)                
+        service = GoogleCalendarApi().getService(write_access = True)
 
         try:
             if "id" in task:                                
@@ -324,11 +357,14 @@ class GoogletasksController(object):
         if lastsec:            
             return dtnow.isoformat()[:11]+"23:59:59.999Z"
         return dtnow.isoformat()
+
         
     def info(self, text):
         logger.info(text)
         if self.window:
             self.window.statusbar.push(0, text)
+    
+    
 
     def _get_new_items(self):        
         service = GoogleCalendarApi().getService()
@@ -354,8 +390,6 @@ class GoogletasksController(object):
             text = ""
             logger.info('Task lists added.')            
             for item in items:
-	        #ipdb.set_trace()
-                #print(item["title"], item["etag"], item["id"], "skipping: " + str(item["etag"] in self.recentItemIds),dateutil.parser.parse(item["due"]).date())
                 if item["etag"] in self.recentItemIds:		 
                     if dateutil.parser.parse(item["due"]).date() >= self.getTime(now = True).date():                        
                         self.itemIds.add(item["etag"])
@@ -363,9 +397,9 @@ class GoogletasksController(object):
                     continue #XXX
                 self.itemIds.add(item["etag"])
                 print(item)
-                text += self.getTaskText(item)
-            if text.strip() != "":
-                text += "\n"
+                text += self.getTaskText(item) + "\n"
+            #if text.strip() != "":
+            #    text += "\n"
         return text
 
     def getTaskText(self, task):
@@ -377,24 +411,44 @@ class GoogletasksController(object):
             s += "\n\t" + task['notes']
         #s+="\n"
         return s
-
-    def readTaskFromSelection(self, buffer):
-        task = { "title": None, "notes": None}
-
-        text = buffer.get_text(*buffer.get_selection_bounds())
-        task_anchor_pos = text.find(TASKANCHOR_SYMBOL.encode("utf-8"))
-        if task_anchor_pos:
-            text = taskAnchorRe.sub("", text)
-            offset = task_anchor_pos + 1 + buffer.get_selection_bounds()[0].get_offset() # the +1 is because of a charset mystery
-            linkdata = buffer.get_link_data(buffer.get_iter_at_offset(offset))
+    
+    def readline(self, lineI): 
+        """ this crazy construct just reads a line in page """
+        buffer = self.window.pageview.view.get_buffer()
+        textiter = buffer.get_iter_at_line(lineI)
+        start = buffer.get_iter_at_offset(textiter.get_offset())
+        if textiter.forward_to_line_end():
+            end = buffer.get_iter_at_offset(textiter.get_offset())
+        else:
+            end = start                
+        return buffer.get_slice(start,end)
+    
+    def getTaskId(self, lineI):
+        buffer = self.window.pageview.view.get_buffer()
+        task_anchor_pos = self.readline(lineI).find(TASKANCHOR_SYMBOL.encode("utf-8"))
+        if task_anchor_pos > -1:
+            offset = task_anchor_pos - 2 + buffer.get_iter_at_line(lineI).get_offset() # the -2 is because of a charset mystery
+            linkdata = buffer.get_link_data(buffer.get_iter_at_offset(offset))            
             if linkdata:
-                task["id"] = linkdata["href"]
-        buffer.delete(*buffer.get_selection_bounds())
+                return linkdata["href"]
+        return None
 
-        text = text.split("\n", 1)
+    def readTaskFromSelection(self):
+        buffer = self.window.pageview.view.get_buffer()
+        task = {}
+
+        lineI = buffer.get_iter_at_offset(min([x.get_offset() for x in buffer.get_selection_bounds()])).get_line() # first line in selection
+        task["id"] = self.getTaskId(lineI)
+
+        text = buffer.get_text(*buffer.get_selection_bounds())        
+        text = taskAnchorRe.sub("", text).split("\n", 1)
         task["title"] = text[0]
         task["notes"]="".join(text[1:])
+        
+        buffer.delete(*buffer.get_selection_bounds()) # cuts the task
         return task
+    
+                
     
     def fetch(self):
         self.itemIds = set()        
@@ -426,8 +480,7 @@ class GoogletasksController(object):
         self.notebook.store_page(self.page)
         if bounds:            
             buffer.select_range(buffer.get_iter_at_offset(bounds[0]), buffer.get_iter_at_offset(bounds[1]))
-            
-            
-        # Save the success info
+                        
+        # Save the list of successfully imported task
         with open(CACHEFILE, "wb") as f:
             pickle.dump(self.itemIds, f)                
