@@ -9,38 +9,29 @@ import sys
 import datetime
 import pickle    
 import dateutil.parser
+import re
+import gtk
 from collections import defaultdict
 
 from zim.actions import action
 from zim.config import XDG_DATA_HOME
 from zim.formats.wiki import Parser
 from zim.notebook import Path
-from zim.main import NotebookCommand
-from zim.ipc import start_server_if_not_running, ServerProxy
-from zim.plugins import PluginClass
-from zim.plugins import WindowExtension
-from zim.plugins import extends
+from zim.main import ZIM_APPLICATION, NotebookCommand
+from zim.main.command import GtkCommand
+from zim.plugins import PluginClass, WindowExtension, extends
+from zim.gui.widgets import Dialog, InputEntry, PageEntry
 
 from apiclient import discovery
 from oauth2client import client
 from oauth2client import tools
 from oauth2client.file import Storage
-
 try:
     import ipdb
 except ImportError:
     pass
 
-
-import gtk
-from zim.gui.widgets import Dialog
-from zim.gui.widgets import InputEntry, PageEntry
-import re
-
-
 logger = logging.getLogger('zim.plugins.googletasks')
-
-
 WORKDIR = str(XDG_DATA_HOME.subdir(('zim', 'plugins')))
 CACHEFILE = WORKDIR + "/googletasks.cache"
 CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
@@ -52,8 +43,6 @@ taskAnchorRe = re.compile(' {} '.format(TASKANCHOR_SYMBOL.encode("utf-8")))
 # initial check
 if not os.path.isfile(CLIENT_SECRET_FILE):
     quit(Googletasks2zimPlugin.plugin_info["name"] + "CLIENT_SECRET_FILE not found")
-
-
 
 
 class GoogletasksPlugin(PluginClass):
@@ -73,18 +62,27 @@ See https://github.com/e3rd/zim-plugin-googletasks for more info.
     #    # T: label for plugin preferences dialog
     #    ('page', 'string', _('What page should be used to be updated by plugin? If not set, homepage is used'), ""),
     #    )
+     
 
-        
-
-class GoogletasksCommand(NotebookCommand):
+class GoogletasksCommand(NotebookCommand, GtkCommand): #6 it used to be NotebookCommand... I dont know where is server proxy now
     '''Class to handle "zim --plugin googletasks" '''    
     arguments = ('[NOTEBOOK]',)
-
-    def run(self):                            
-	start_server_if_not_running()
-	server = ServerProxy()            
-	ui = server.get_notebook(self.get_notebook_argument()[0].uri, False)
-	reload = (lambda: ui.reload_page()) if ui else lambda: None
+    
+    def hej(self):
+        print("ZDEE")
+        with open("/tmp/text","w") as f:
+            f.write("joo5")
+  
+    def run(self):                   
+        for window in ZIM_APPLICATION._windows:
+            if window.ui.notebook.uri == self.get_notebook_argument()[0].uri:
+                notebook=window.ui.notebook;
+                ui=window.ui;
+                break;
+        else:
+            ui = None            
+	
+	reload = (lambda: ui.reload_page()) if ui else lambda: None # function exists only if zim is open
 	ntb, _ = self.build_notebook()
 	reload() # save current user's work, if zim's open
 	GoogletasksController(notebook = ntb).fetch() # add new lines
