@@ -21,6 +21,7 @@ from zim.main import ZIM_APPLICATION, NotebookCommand
 from zim.main.command import GtkCommand
 from zim.plugins import PluginClass, WindowExtension, extends
 from zim.gui.widgets import Dialog, InputEntry, PageEntry
+from zim.formats import get_dumper
 
 from apiclient import discovery
 from oauth2client import client
@@ -37,7 +38,7 @@ CACHEFILE = WORKDIR + "/googletasks.cache"
 CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 APPLICATION_NAME = 'googletasks2zim'
 TASKANCHOR_SYMBOL = u"\u270b"
-#linkIconRe = re.compile('(.*)\[\[([^|]*)\|'+LINKICON+'\]\](.*)')
+taskAnchorTreeRe = re.compile('(\[ \]\s)?\[\[([^|]*)\|'+TASKANCHOR_SYMBOL+'\]\]\s?(.*)')
 taskAnchorRe = re.compile(' {} '.format(TASKANCHOR_SYMBOL.encode("utf-8")))
 
 # initial check
@@ -58,7 +59,7 @@ See https://github.com/e3rd/zim-plugin-googletasks for more info.
         'author': "Edvard Rejthar",
     }
 
-    #plugin_preferences = ( I dont want to use that until I can access it from command line. (self.plugin doesnt exist there)
+    #plugin_preferences = ( I dont want to use that until I can access it from command line. (self.plugin doesnt exist there) UZ TO JDE! co zim.plugins.lookup_subclass(module, ParserClass) nebo neco predtim jsem videl
     #    # T: label for plugin preferences dialog
     #    ('page', 'string', _('What page should be used to be updated by plugin? If not set, homepage is used'), ""),
     #    )
@@ -204,13 +205,14 @@ class GoogletasksWindow(WindowExtension):
             lineI = buffer.get_insert_iter().get_line()
             startiter = buffer.get_iter_at_line(lineI)
 
+            #import ipdb; ipdb.set_trace()
             while True:
                 lineI += 1
                 s = None
                 try:
                     s = self.controller.readline(lineI)
                 finally:
-                    if not s or not s.strip() or TASKANCHOR_SYMBOL.encode("utf-8") in s: # not s.startswith("\t")
+                    if not s or not s.strip() or s.startswith("\n") or TASKANCHOR_SYMBOL.encode("utf-8") in s: # not s.startswith("\t")
                         lineI -= 1
                         break
 
@@ -368,14 +370,22 @@ class GoogletasksController(object):
             return False
         return True
 
-    def getTime(self, addDays = 0, now = False, dateonly = False, morning = False, midnight = False, lastsec = False, userstring=None):
-        dtnow =  dateutil.parser.parse(userstring) if userstring else datetime.datetime.now()
+    def getTime(self, addDays = 0, now = False, dateonly = False, morning = False, midnight = False, lastsec = False, userstring=None, userdate=None):
+        dtnow = userdate if userdate else dateutil.parser.parse(userstring) if userstring else datetime.datetime.now()
+        """if userdate:
+            dtnow = userdate
+        elif userstring:
+            dtnow = dateutil.parser.parse(userstring)
+        else:
+            dtnow = datetime.datetime.now()"""
         if now:
             return dtnow
         if addDays:
             dtnow += datetime.timedelta(addDays, 0)
         if dateonly:
             return dtnow.isoformat()[:10]
+        if midnight:
+            return dtnow.isoformat()[:11]+"00:00:00.000Z"
         if morning:
             return dtnow.isoformat()[:11]+"08:00:00.000Z"
         if midnight:
@@ -398,15 +408,15 @@ class GoogletasksController(object):
         if os.path.isfile(CACHEFILE):
             with open(CACHEFILE, "rb") as f:
                 self.recentItemIds = pickle.load(f)
-            dueMin = datetime.datetime.fromtimestamp(os.path.getmtime(CACHEFILE)).isoformat()[:11]
+            dueMin = self.getTime(userdate=datetime.datetime.fromtimestamp(os.path.getmtime(CACHEFILE)), midnight=True)
         else:
             self.recentItemIds = set()
-            dueMin = self.getTime(dateonly = True)
+            dueMin = self.getTime(midnight=True)
 
         results = service.tasks().list(maxResults=10,
                                     tasklist = "@default",
                                     showCompleted = False,
-                                    dueMin = dueMin + "T00:00:00.000Z",
+                                    dueMin = dueMin,
                                     dueMax = self.getTime(lastsec = True)).execute()
         items = results.get('items', [])
         if not items:
@@ -460,21 +470,33 @@ class GoogletasksController(object):
                 return linkdata["href"]
         return None
 
+
     def readTaskFromSelection(self):
         buffer = self.window.pageview.view.get_buffer()
         task = {}
 
-        lineI = buffer.get_iter_at_offset(min([x.get_offset() for x in buffer.get_selection_bounds()])).get_line() # first line in selection
-        task["id"] = self.getTaskId(lineI)
+        #lineI = buffer.get_iter_at_offset(min([x.get_offset() for x in buffer.get_selection_bounds()])).get_line() # first line in selection
+        #task["id"] = self.getTaskId(lineI)
 
-        text = buffer.get_text(*buffer.get_selection_bounds())
-        text = taskAnchorRe.sub("", text).split("\n", 1)
-        task["title"] = text[0]
-        task["notes"]="".join(text[1:])
+        #import ipdb; ipdb.set_trace()
+
+        lines = get_dumper("wiki").dump(buffer.get_parsetree(buffer.get_selection_bounds()))
+        match = taskAnchorTreeRe.match("".join(lines))
+        if match:
+            task["id"], task["title"] = match.group(2), match.group(3).split("\n",1)[0]
+        else:
+            task["title"] = lines[0]
+        task["notes"]= "".join(lines[1:])
+
+
+        #text = buffer.get_text(*buffer.get_selection_bounds())
+        #text = taskAnchorRe.sub("", text).split("\n", 1) # XXX #5 musi to umet checknout stazeny task: text =
+
+        #task["title"] = text[0]
+        #task["notes"]="".join(text[1:])
 
         buffer.delete(*buffer.get_selection_bounds()) # cuts the task
         return task
-
 
 
     def fetch(self):
