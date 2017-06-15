@@ -12,8 +12,10 @@ Same as for the other plugins, but needs some Google Tasks API dependencies.
 * Enjoy
 
 ### Optional
-If you want to synchronise automatically, I recommend using anacron. By using this line, you should get synchronised at 7:30 AM or 5 minutes after computer launch:  
-```gksudo echo "1	5	googletasks2zim	zim --plugin googletasks" >> /etc/anacrontab```
+If you want to synchronise automatically, I recommend using anacron. This line helps me get synchronised at 7:30 AM or 5 minutes after computer launch (Ubuntu 17.04):
+```bash
+echo "1   5   googletasks2zim sudo su YOUR-USERNAME bash -c 'export DISPLAY=:0 && zim --plugin googletasks'" | sudo tee -a /etc/anacrontab
+```
 
 ## How the propagation works?
 When importing, the task will preserve it's Google-ID in a small link. If you complete the checkbox of zim-task, the plugin searches for this link and mark the task completed on server.
