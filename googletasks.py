@@ -39,7 +39,7 @@ CACHEFILE = WORKDIR + "/googletasks.cache"
 CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 APPLICATION_NAME = 'googletasks2zim'
 TASKANCHOR_SYMBOL = u"\u270b"
-taskAnchorTreeRe = re.compile('(\[ \]\s)?\[\[([^|]*)\|' + TASKANCHOR_SYMBOL + '\]\]\s?(.*)')
+taskAnchorTreeRe = re.compile('(\[ \]\s)?\[\[gtasks://([^|]*)\|' + TASKANCHOR_SYMBOL + '\]\]\s?(.*)')
 taskAnchorRe = re.compile(' {} '.format(TASKANCHOR_SYMBOL.encode("utf-8")))
 
 # initial check
@@ -434,7 +434,7 @@ class GoogletasksController(object):
     def getTaskText(self, task):
         s = "[ ] "
         if task.get("id", ""):
-            s += "[[{}|{}]] ".format(task["id"], TASKANCHOR_SYMBOL)
+            s += "[[gtasks://{}|{}]] ".format(task["id"], TASKANCHOR_SYMBOL)
         if "title" not in task:
             logger.error("Task text is missing")
             return False
@@ -460,9 +460,11 @@ class GoogletasksController(object):
         task_anchor_pos = self.readline(lineI).find(TASKANCHOR_SYMBOL.encode("utf-8"))
         if task_anchor_pos > -1:
             offset = task_anchor_pos - 2 + buffer.get_iter_at_line(lineI).get_offset() # the -2 is because of a charset mystery
-            linkdata = buffer.get_link_data(buffer.get_iter_at_offset(offset))
-            if linkdata:
-                return linkdata["href"]
+            try:
+                linkdata = buffer.get_link_data(buffer.get_iter_at_offset(offset))
+                return linkdata["href"].split("gtasks://")[1] #linkdata["href"]
+            except:
+                pass
         return None
 
 
