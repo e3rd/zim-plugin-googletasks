@@ -8,13 +8,12 @@ import dateutil.parser
 import gtk
 import httplib2
 import logging
-from oauth2client import client
-from oauth2client import tools
-from oauth2client.file import Storage
 import os
 import pickle
 import re
 import sys
+from oauth2client import client, tools
+from oauth2client.file import Storage
 from zim.actions import action
 from zim.config import XDG_DATA_HOME
 from zim.formats import get_dumper
@@ -40,7 +39,6 @@ CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 APPLICATION_NAME = 'googletasks2zim'
 TASKANCHOR_SYMBOL = u"\u270b"
 taskAnchorTreeRe = re.compile('(\[ \]\s)?\[\[gtasks://([^|]*)\|' + TASKANCHOR_SYMBOL + '\]\]\s?(.*)')
-taskAnchorRe = re.compile(' {} '.format(TASKANCHOR_SYMBOL.encode("utf-8")))
 
 # initial check
 if not os.path.isfile(CLIENT_SECRET_FILE):
@@ -239,7 +237,8 @@ class GoogletasksWindow(WindowExtension):
         self.gui.vbox.pack_start(self.gui.inputNotes, False)
 
         # date field
-        self.gui.inputDue = InputEntry(allow_empty=False, placeholder_text=self.controller.getTime(addDays=1, dateonly=True))
+        self.gui.inputDue = InputEntry(allow_empty=False)
+        self.gui.inputDue.set_text(self.controller.getTime(addDays=1, dateonly=True))
         self.gui.vbox.pack_start(self.gui.inputDue, False)
 
         # 9 postponing buttons

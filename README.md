@@ -22,3 +22,6 @@ When importing, the task will preserve it's Google-ID in a small link. If you co
 
 ## One image for hundred words
 ![Demonstration](example.png?raw=true)
+
+## Missing feature?
+Feel free to tell me in the issues what you'd like it to do.
