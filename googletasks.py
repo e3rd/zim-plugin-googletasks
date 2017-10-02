@@ -15,7 +15,7 @@ import sys
 from oauth2client import client, tools
 from oauth2client.file import Storage
 from zim.actions import action
-from zim.config import XDG_DATA_HOME
+from zim.config import XDG_DATA_HOME, ConfigManager
 from zim.formats import get_dumper
 from zim.formats.wiki import Parser
 from zim.gui.widgets import Dialog
@@ -23,7 +23,7 @@ from zim.gui.widgets import InputEntry
 from zim.main import NotebookCommand
 from zim.main import ZIM_APPLICATION
 from zim.main.command import GtkCommand
-from zim.notebook import build_notebook
+from zim.notebook import build_notebook, Path
 from zim.plugins import PluginClass
 from zim.plugins import WindowExtension
 from zim.plugins import extends
@@ -50,23 +50,28 @@ class GoogletasksPlugin(PluginClass):
     plugin_info = {
         'name': _('Google Tasks'),
         'description': _('''\
-Connects to your default Google Tasks lists. Append today's tasks in the middle of your Home file. At first run, it appends today's tasks; next, it'll append new tasks added since last synchronisation. Every task should be imported only once, unless it's changed.
+Connects to your default Google Tasks lists. Append today's tasks to your Home file. At first run, it appends today's tasks; next, it'll append new tasks added since last synchronisation every Zim startup (and every day, when set in anacron). Every task should be imported only once, unless changed on the server.
 
+It preserves most of Zim formatting (notably links).
+You may create new task from inside Zim - just select some text, choose menu item Task from selection and set the date it should be restored in Zim from Google server.
 See https://github.com/e3rd/zim-plugin-googletasks for more info.
 (V1.0)
 '''),
         'author': "Edvard Rejthar",
     }
 
-    #plugin_preferences = ( I dont want to use that until I can access it from command line. (self.plugin doesnt exist there) UZ TO JDE! co zim.plugins.lookup_subclass(module, ParserClass) nebo neco predtim jsem videl
-    #    # T: label for plugin preferences dialog
-    #    ('page', 'string', _('What page should be used to be updated by plugin? If not set, homepage is used'), ""),
-    #    )
+    plugin_preferences = (
+        # T: label for plugin preferences dialog
+        ('startup_check','bool',_('Fetch new tasks on Zim startup'), True),
+        ('page', 'string', _('What page should be used to be updated by plugin? If not set, homepage is used'), ""),
+        )
 
 
 class GoogletasksCommand(NotebookCommand, GtkCommand):
     '''Class to handle "zim --plugin googletasks" '''
     arguments = ('[NOTEBOOK]',)
+
+    preferences = ConfigManager().get_config_dict('preferences.conf')['GoogletasksPlugin'].dump()
 
     def run(self):
         ntbName = self.get_notebook_argument()[0] or self.get_default_or_only_notebook()
@@ -79,7 +84,7 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
 	#not needed since 0.67rc1 reload = (lambda: ui.reload_page()) if ui else lambda: None # function exists only if zim is open
         ntb, _ = build_notebook(ntbName)
 	#reload() # save current user's work, if zim's open
-	GoogletasksController(notebook=ntb).fetch() # add new lines
+	GoogletasksController(notebook=ntb, preferences=GoogletasksCommand.preferences).fetch() # add new lines
 	#reload() # save new lines
 
 class GoogleCalendarApi(object):
@@ -143,7 +148,6 @@ from zim.formats import CHECKED_BOX, UNCHECKED_BOX
 
 @extends('MainWindow')
 class GoogletasksWindow(WindowExtension):
-
     s = ""
     if not GoogleCalendarApi.serviceObtainable():
         s += "<menuitem action='permission_readonly'/>"
@@ -175,7 +179,10 @@ class GoogletasksWindow(WindowExtension):
 
     def __init__(self, * args, ** kwargs):
         WindowExtension.__init__(self, * args, ** kwargs) #super(WindowExtension, self).__init__(*args, **kwargs)
-        controller = self.controller = GoogletasksController(window=self.window)
+        if self.plugin.preferences['startup_check']:
+            GoogletasksCommand("--plugin googletasks").run()
+        controller = self.controller = GoogletasksController(window=self.window, preferences=self.plugin.preferences)
+        #self.import_tasks()
 
         @monkeypatch_method(TextBuffer)
         def set_bullet(self, row, bullet):
@@ -319,14 +326,15 @@ class GoogletasksNewtaskDialog(Dialog):
 
 class GoogletasksController(object):
 
-    def __init__(self, window=None, notebook=None):
+    def __init__(self, window=None, notebook=None, preferences = None):
         self.window = window
         self.notebook = notebook
-        self.preferences = GoogletasksPlugin.plugin_preferences
+        self.preferences = preferences
         if not self.notebook and self.window:
             self.notebook = self.window.ui.notebook
-        #self.page = notebook.get_page(Path(self.preferences["page"])) if self.preferences["page"] else self.notebook.get_home_page()
-        self.page = self.notebook.get_home_page()
+        #self.page = self.notebook.get_page(Path(self.preferences["page"])) if self.preferences["page"] else self.notebook.get_home_page()
+        self.page = self.notebook.get_page(Path(self.preferences["page"])) if self.preferences["page"] else self.notebook.get_home_page()
+        #self.page = self.notebook.get_home_page()
         logger.debug("Google tasks page: {} ".format(self.page))
 
     def task_checked(self, taskid, bullet):
@@ -390,6 +398,7 @@ class GoogletasksController(object):
 
 
     def info(self, text):
+        text = "Googletasks \ " + text
         logger.info(text)
         if self.window:
             self.window.statusbar.push(0, text)
@@ -418,7 +427,7 @@ class GoogletasksController(object):
             return
         else:
             text = ""
-            logger.info('Task lists added.')
+            c = 0
             for item in items:
                 if item["etag"] in self.recentItemIds:
                     if self.getTime(fromString=item["due"], object=True).date() >= self.getTime(object=True).date():
@@ -426,8 +435,10 @@ class GoogletasksController(object):
                     logger.debug('Skipping {}.'.format(item['title']))
                     continue
                 self.itemIds.add(item["etag"])
-                print(item)
+                logger.info(item)
+                c += 1
                 text += self.getTaskText(item) + "\n"
+            self.info("New tasks: {}, page: {}".format(c,self.page.get_title()))
         return text
 
     def getTaskText(self, task):
