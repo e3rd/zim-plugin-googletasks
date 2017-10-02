@@ -18,7 +18,7 @@ echo "1   5   googletasks2zim sudo su YOUR-USERNAME bash -c 'export DISPLAY=:0 &
 ```
 
 ## How the propagation works?
-When importing, the task will preserve it's Google-ID in a small link. If you complete the checkbox of zim-task, the plugin searches for this link and mark the task completed on server.
+When importing, the task will preserve it's Google-ID in a small link. If you complete the checkbox of zim-task, the plugin searches for this link and marks the task completed on server.
 
 ## One image for hundred words
 ![Demonstration](example.png?raw=true)

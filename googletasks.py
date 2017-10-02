@@ -212,7 +212,9 @@ class GoogletasksWindow(WindowExtension):
                 try:
                     s = self.controller.readline(lineI)
                 finally:
-                    if not s or not s.strip() or s.startswith("\n") or TASKANCHOR_SYMBOL.encode("utf-8") in s: # not s.startswith("\t")
+                    if (not s or not s.strip() or s.startswith("\n") or
+                            s.startswith("\xef\xbf\xbc ") or # begins with a checkbox
+                            TASKANCHOR_SYMBOL.encode("utf-8") in s): # not s.startswith("\t")
                         lineI -= 1
                         break
 
@@ -241,12 +243,17 @@ class GoogletasksWindow(WindowExtension):
         self.gui.inputTitle = InputEntry(allow_empty=False, placeholder_text="task title")
         self.gui.vbox.pack_start(self.gui.inputTitle, False)
         self.gui.inputNotes = gtk.TextView()
-        self.gui.vbox.pack_start(self.gui.inputNotes, False)
 
         # date field
         self.gui.inputDue = InputEntry(allow_empty=False)
         self.gui.inputDue.set_text(self.controller.getTime(addDays=1, dateonly=True))
         self.gui.vbox.pack_start(self.gui.inputDue, False)
+
+        # we cant tab out from notes textarea field, hence its placed under date
+        self.gui.vbox.pack_start(self.gui.inputNotes, False)
+
+
+
 
         # 9 postponing buttons
         hbox = gtk.HBox()
@@ -338,6 +345,7 @@ class GoogletasksController(object):
         logger.debug("Google tasks page: {} ".format(self.page))
 
     def task_checked(self, taskid, bullet):
+        """ un/mark task on Google server """
         service = GoogleCalendarApi().getService(write_access=True)
         task = {"status": "completed" if bullet is CHECKED_BOX else "needsAction"}
         try:
@@ -355,6 +363,7 @@ class GoogletasksController(object):
         return True
 
     def submit_task(self, task={}):
+        """ Upload task to Google server """
         if "due" not in task: # fallback - default is to postpone the task by a day
             task["due"] = self.getTime(addDays=1, morning=True)
 
@@ -373,13 +382,8 @@ class GoogletasksController(object):
         return True
 
     def getTime(self, addDays=0, object=False, dateonly=False, morning=False, midnight=False, lastsec=False, fromString=None, usedate=None):
+        """ Time formatting function """
         dtnow = usedate if usedate else dateutil.parser.parse(fromString) if fromString else datetime.datetime.now()
-        """if usedate:
-            dtnow = usedate
-        elif fromString:
-            dtnow = dateutil.parser.parse(fromString)
-        else:
-            dtnow = datetime.datetime.now()"""
         if object:
             return dtnow
         if addDays:
@@ -398,6 +402,7 @@ class GoogletasksController(object):
 
 
     def info(self, text):
+        """ Echo to the console and status bar. """
         text = "Googletasks \ " + text
         logger.info(text)
         if self.window:
@@ -406,6 +411,7 @@ class GoogletasksController(object):
 
 
     def _get_new_items(self):
+        """ Download new tasks from google server. """
         service = GoogleCalendarApi().getService()
 
         if os.path.isfile(CACHEFILE):
@@ -442,20 +448,21 @@ class GoogletasksController(object):
         return text
 
     def getTaskText(self, task):
+        """ formats task object to zim markup """
         s = "[ ] "
         if task.get("id", ""):
             s += "[[gtasks://{}|{}]] ".format(task["id"], TASKANCHOR_SYMBOL)
         if "title" not in task:
             logger.error("Task text is missing")
             return False
-        s += task['title']
+        s += task['title'][4:] if task['title'].startswith("[ ] ") else task['title'] # we dont want to have the task started with: "[ ] [ ] "
         if task.get("notes", ""):
             s += "\n\t" + task['notes']
         #s+="\n"
         return s
 
     def readline(self, lineI):
-        """ this crazy construct just reads a line in page """
+        """ this crazy construct just reads a line in a page """
         buffer = self.window.pageview.view.get_buffer()
         textiter = buffer.get_iter_at_line(lineI)
         start = buffer.get_iter_at_offset(textiter.get_offset())
@@ -485,14 +492,13 @@ class GoogletasksController(object):
         #lineI = buffer.get_iter_at_offset(min([x.get_offset() for x in buffer.get_selection_bounds()])).get_line() # first line in selection
         #task["id"] = self.getTaskId(lineI)
 
-        #import ipdb; ipdb.set_trace()
 
         lines = get_dumper("wiki").dump(buffer.get_parsetree(buffer.get_selection_bounds()))
         match = taskAnchorTreeRe.match("".join(lines))
         if match:
             task["id"], task["title"] = match.group(2), match.group(3).split("\n", 1)[0]
         else:
-            task["title"] = lines[0]
+            task["title"] = lines[0].strip()
         task["notes"] = "".join(lines[1:])
 
         #text = buffer.get_text(*buffer.get_selection_bounds())
@@ -506,6 +512,7 @@ class GoogletasksController(object):
 
 
     def fetch(self):
+        """ Get the new tasks and insert them into page"""
         self.itemIds = set()
 
         text = self._get_new_items()
