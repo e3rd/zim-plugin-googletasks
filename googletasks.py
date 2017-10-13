@@ -246,8 +246,14 @@ class GoogletasksWindow(WindowExtension):
 
         # date field
         self.gui.inputDue = InputEntry(allow_empty=False)
-        self.gui.inputDue.set_text(self.controller.getTime(addDays=1, dateonly=True))
-        self.gui.vbox.pack_start(self.gui.inputDue, False)
+        self.gui.inputDue.set_text(self.controller.getTime(addDays=1, mode="dateonly"))
+        self.gui.inputDue.connect('changed', self.update_date)
+        self.gui.labelDue = gtk.Label(self.controller.getTime(addDays=1, mode="day"))
+        hbox = gtk.HBox(spacing=1)
+        hbox.pack_start(self.gui.inputDue)
+        hbox.pack_start(self.gui.labelDue)
+        #self.gui.vbox.pack_start(self.gui.inputDue, False)
+        self.gui.vbox.pack_start(hbox, False)
 
         # we cant tab out from notes textarea field, hence its placed under date
         self.gui.vbox.pack_start(self.gui.inputNotes, False)
@@ -260,7 +266,7 @@ class GoogletasksWindow(WindowExtension):
         self.gui.vbox.add(hbox)
         hbox.pack_start(gtk.Label(('Days: ')), False)
         for i in range(1, 10):
-            button = gtk.Button(label="_{}".format(i))
+            button = gtk.Button(label="_{} {}".format(i,self.controller.getTime(addDays=i, mode="day")))
             button.connect("clicked", self.gui.postpone, i)
             hbox.pack_start(button, False)
 
@@ -287,6 +293,13 @@ class GoogletasksWindow(WindowExtension):
     def import_tasks(self):
         self.controller.fetch()
 
+    def update_date(self, _):
+        try:
+            day = self.controller.getTime(fromString=self.gui.inputDue.get_text(), mode="day")
+        except ValueError:
+            day = "N/A"
+        self.gui.labelDue.set_text(day)
+
 class GoogletasksNewtaskDialog(Dialog):
     def _loadTask(self):
         try:
@@ -295,7 +308,7 @@ class GoogletasksNewtaskDialog(Dialog):
             self.task["title"] = self.inputTitle.get_text()
             if self.inputDue.get_text():
                 try:
-                    self.task["due"] = self.controller.getTime(fromString=self.inputDue.get_text(), morning=True)
+                    self.task["due"] = self.controller.getTime(fromString=self.inputDue.get_text(), mode="morning")
                 except:
                     logger.error("Failed due date parsing")
                     raise
@@ -328,7 +341,7 @@ class GoogletasksNewtaskDialog(Dialog):
         self.controller = controller
 
     def postpone(self, _, number):
-        self.inputDue.set_text(self.controller.getTime(addDays=number, dateonly=True))
+        self.inputDue.set_text(self.controller.getTime(addDays=number, mode="dateonly"))
         self.do_response_ok()
 
 class GoogletasksController(object):
@@ -365,7 +378,7 @@ class GoogletasksController(object):
     def submit_task(self, task={}):
         """ Upload task to Google server """
         if "due" not in task: # fallback - default is to postpone the task by a day
-            task["due"] = self.getTime(addDays=1, morning=True)
+            task["due"] = self.getTime(addDays=1, mode="morning")
 
         service = GoogleCalendarApi().getService(write_access=True)
 
@@ -381,23 +394,25 @@ class GoogletasksController(object):
             return False
         return True
 
-    def getTime(self, addDays=0, object=False, dateonly=False, morning=False, midnight=False, lastsec=False, fromString=None, usedate=None):
-        """ Time formatting function """
+    def getTime(self, addDays=0, mode=None, fromString=None, usedate=None):
+        """ Time formatting function
+         mode =  object | dateonly | morning | midnight | lastsec | day
+        """
         dtnow = usedate if usedate else dateutil.parser.parse(fromString) if fromString else datetime.datetime.now()
-        if object:
-            return dtnow
         if addDays:
             dtnow += datetime.timedelta(addDays, 0)
-        if dateonly:
-            return dtnow.isoformat()[:10]
-        if midnight:
-            return dtnow.isoformat()[:11] + "00:00:00.000Z"
-        if morning:
-            return dtnow.isoformat()[:11] + "08:00:00.000Z"
-        if midnight:
-            return dtnow.isoformat()[:11] + "23:59:59.999Z"
-        if lastsec:
-            return dtnow.isoformat()[:11] + "23:59:59.999Z"
+        if mode:
+            try:
+                return {
+                    "object": lambda: dtnow,
+                    "dateonly": lambda: dtnow.isoformat()[:10],
+                    "midnight": lambda: dtnow.isoformat()[:11] + "00:00:00.000Z",
+                    "morning": lambda: dtnow.isoformat()[:11] + "08:00:00.000Z",
+                    "lastsec": lambda: dtnow.isoformat()[:11] + "23:59:59.999Z",
+                    "day": lambda: dtnow.strftime("%A").decode("utf-8").lower()[:2]
+                }[mode]()
+            except KeyError:
+                logger.error("Wrong time mode {}!".format(mode))
         return dtnow.isoformat()
 
 
@@ -417,16 +432,16 @@ class GoogletasksController(object):
         if os.path.isfile(CACHEFILE):
             with open(CACHEFILE, "rb") as f:
                 self.recentItemIds = pickle.load(f)
-            dueMin = self.getTime(usedate=datetime.datetime.fromtimestamp(os.path.getmtime(CACHEFILE)), midnight=True)
+            dueMin = self.getTime(usedate=datetime.datetime.fromtimestamp(os.path.getmtime(CACHEFILE)), mode="midnight")
         else:
             self.recentItemIds = set()
-            dueMin = self.getTime(midnight=True)
+            dueMin = self.getTime(mode="midnight")
 
         results = service.tasks().list(maxResults=10,
                                        tasklist="@default",
                                        showCompleted=False,
                                        dueMin=dueMin,
-                                       dueMax=self.getTime(lastsec=True)).execute()
+                                       dueMax=self.getTime(mode="lastsec")).execute()
         items = results.get('items', [])
         if not items:
             self.info('No task lists found.')
@@ -436,7 +451,7 @@ class GoogletasksController(object):
             c = 0
             for item in items:
                 if item["etag"] in self.recentItemIds:
-                    if self.getTime(fromString=item["due"], object=True).date() >= self.getTime(object=True).date():
+                    if self.getTime(fromString=item["due"], mode="object").date() >= self.getTime(mode="object").date():
                         self.itemIds.add(item["etag"])
                     logger.debug('Skipping {}.'.format(item['title']))
                     continue
@@ -498,7 +513,10 @@ class GoogletasksController(object):
         if match:
             task["id"], task["title"] = match.group(2), match.group(3).split("\n", 1)[0]
         else:
-            task["title"] = lines[0].strip()
+            try:
+                task["title"] = lines[0].strip()
+            except IndexError:
+                task["title"] = ""
         task["notes"] = "".join(lines[1:])
 
         #text = buffer.get_text(*buffer.get_selection_bounds())
