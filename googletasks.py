@@ -18,8 +18,21 @@ from zim.actions import action
 from zim.config import XDG_DATA_HOME, ConfigManager
 from zim.formats import get_dumper
 from zim.formats.wiki import Parser
-from zim.gui.widgets import Dialog
-from zim.gui.widgets import InputEntry
+try:
+    from zim.gui.widgets import Dialog
+    from zim.gui.widgets import InputEntry
+    from zim.gui.pageview import TextBuffer    
+except RuntimeError:
+    """ When invoking the plugin from commandline, I'm was getting this on Ubuntu 17.10.
+    Defining blank Dialog class helps me to mitigate this strange issue.
+    
+     File "/usr/lib/python2.7/dist-packages/zim/gui/clipboard.py", line 477, in __init__
+        self.clipboard = gtk.Clipboard(selection=atom)
+     RuntimeError: could not create GtkClipboard object
+     """
+    class Dialog():
+        pass
+from zim.formats import CHECKED_BOX, UNCHECKED_BOX
 from zim.main import NotebookCommand
 from zim.main import ZIM_APPLICATION
 from zim.main.command import GtkCommand
@@ -139,11 +152,6 @@ def monkeypatch_method(cls):
         setattr(cls, func.__name__, func)
         return func
     return decorator
-
-from zim.gui.pageview import TextBuffer
-from zim.formats import CHECKED_BOX, UNCHECKED_BOX
-
-
 
 
 @extends('MainWindow')
@@ -437,7 +445,7 @@ class GoogletasksController(object):
             self.recentItemIds = set()
             dueMin = self.getTime(mode="midnight")
 
-        results = service.tasks().list(maxResults=10,
+        results = service.tasks().list(maxResults=999,
                                        tasklist="@default",
                                        showCompleted=False,
                                        dueMin=dueMin,
