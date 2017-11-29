@@ -3,10 +3,9 @@ Connects to your default Google Tasks lists. Append today's tasks to your Home f
 
 ## Installation
 Same as for the other plugins, but needs some Google Tasks API dependencies.
-* pip2 install --user google-api-python-client
-* pip2 install --user oauth2client==3.0.0
-* Put the googletasks.py and googletasks_client_id.json into the plugins folder
-  * something like %appdata%\zim\data\zim\plugins in Win, or /~/.local/share/zim/plugins/ in Linux
+* Run `pip2 install --user google-api-python-client oauth2client==3.0.0`
+* Put the `googletasks.py` and `googletasks_client_id.json` into the plugins folder
+  * something like `%appdata%\zim\data\zim\plugins` in Win, or `~/.local/share/zim/plugins/` in Linux
 * You enable the plugin in Zim/Edit/Preferences/Plugins/ check mark Google tasks.
 * Go to Tools / Google Tasks / Import new tasks
 * Enjoy

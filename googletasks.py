@@ -52,6 +52,7 @@ CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 APPLICATION_NAME = 'googletasks2zim'
 TASKANCHOR_SYMBOL = u"\u270b"
 taskAnchorTreeRe = re.compile('(\[ \]\s)?\[\[gtasks://([^|]*)\|' + TASKANCHOR_SYMBOL + '\]\]\s?(.*)')
+INVALID_DAY = "N/A"
 
 # initial check
 if not os.path.isfile(CLIENT_SECRET_FILE):
@@ -303,9 +304,9 @@ class GoogletasksWindow(WindowExtension):
 
     def update_date(self, _):
         try:
-            day = self.controller.getTime(fromString=self.gui.inputDue.get_text(), mode="day")
+            day = self.controller.getTime(fromString=self.gui.inputDue.get_text(), mode="day", pastDates=False)
         except ValueError:
-            day = "N/A"
+            day = INVALID_DAY
         self.gui.labelDue.set_text(day)
 
 class GoogletasksNewtaskDialog(Dialog):
@@ -330,7 +331,9 @@ class GoogletasksNewtaskDialog(Dialog):
         else:
             self.do_response_cancel()
 
-    def do_response_ok(self):
+    def do_response_ok(self):        
+        if self.labelDue.get_text() == INVALID_DAY:
+            return False
         self._loadTask()
         self.destroy() # immediately close (so that we wont hit Ok twice)
         if not self.controller.submit_task(task=self.task):
@@ -400,15 +403,26 @@ class GoogletasksController(object):
         except:
             self.info('Error in communication with Google Tasks: {}'.format(sys.exc_info()[1]))
             return False
+                                    
+        #with open(CACHEFILE, "rb+") as f: #15
+        #    recentItemIds = pickle.load(f)
+        #    recentItemIds.remove(result["etag"])
+        #    f.seek(0)
+        #    pickle.dump(recentItemIds, f)
+        #    f.write(output)
+        #    f.truncate()                                
+    
         return True
 
-    def getTime(self, addDays=0, mode=None, fromString=None, usedate=None):
+    def getTime(self, addDays=0, mode=None, fromString=None, usedate=None, pastDates=True):
         """ Time formatting function
          mode =  object | dateonly | morning | midnight | lastsec | day
         """
         dtnow = usedate if usedate else dateutil.parser.parse(fromString) if fromString else datetime.datetime.now()
         if addDays:
-            dtnow += datetime.timedelta(addDays, 0)
+            dtnow += datetime.timedelta(addDays, 0)        
+        if not pastDates and dtnow.isoformat()[:10] < datetime.datetime.now().isoformat()[:10]: # why isoformat? something with tzinfo
+            raise ValueError            
         if mode:
             try:
                 return {
@@ -433,18 +447,9 @@ class GoogletasksController(object):
 
 
 
-    def _get_new_items(self):
+    def _get_new_items(self, dueMin):
         """ Download new tasks from google server. """
         service = GoogleCalendarApi().getService()
-
-        if os.path.isfile(CACHEFILE):
-            with open(CACHEFILE, "rb") as f:
-                self.recentItemIds = pickle.load(f)
-            dueMin = self.getTime(usedate=datetime.datetime.fromtimestamp(os.path.getmtime(CACHEFILE)), mode="midnight")
-        else:
-            self.recentItemIds = set()
-            dueMin = self.getTime(mode="midnight")
-
         results = service.tasks().list(maxResults=999,
                                        tasklist="@default",
                                        showCompleted=False,
@@ -539,9 +544,19 @@ class GoogletasksController(object):
 
     def fetch(self):
         """ Get the new tasks and insert them into page"""
+        
+        # Load the list of recently seen tasks
         self.itemIds = set()
+        if os.path.isfile(CACHEFILE):
+            with open(CACHEFILE, "rb") as f:
+                self.recentItemIds = pickle.load(f)
+            dueMin = self.getTime(usedate=datetime.datetime.fromtimestamp(os.path.getmtime(CACHEFILE)), mode="midnight")
+        else:
+            self.recentItemIds = set()
+            dueMin = self.getTime(mode="midnight")
 
-        text = self._get_new_items()
+        # Do internal fetching of new tasks text
+        text = self._get_new_items(dueMin)
         if not text:
             return
 
