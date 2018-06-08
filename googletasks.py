@@ -2,26 +2,30 @@
 # -*- coding: utf-8 -*-
 #
 from __future__ import print_function
-from apiclient import discovery
+
 import datetime
-import dateutil.parser
-import gtk
-import httplib2
+from time import time
 import logging
 import os
 import pickle
 import re
 import sys
+
+import dateutil.parser
+import gtk
+import httplib2
+from apiclient import discovery
 from oauth2client import client, tools
 from oauth2client.file import Storage
 from zim.actions import action
 from zim.config import XDG_DATA_HOME, ConfigManager
 from zim.formats import get_dumper
 from zim.formats.wiki import Parser
+
 try:
     from zim.gui.widgets import Dialog
     from zim.gui.widgets import InputEntry
-    from zim.gui.pageview import TextBuffer    
+    from zim.gui.pageview import TextBuffer
 except RuntimeError:
     """ When invoking the plugin from commandline, I'm was getting this on Ubuntu 17.10.
     Defining blank Dialog class helps me to mitigate this strange issue.
@@ -30,6 +34,8 @@ except RuntimeError:
         self.clipboard = gtk.Clipboard(selection=atom)
      RuntimeError: could not create GtkClipboard object
      """
+
+
     class Dialog():
         pass
 from zim.formats import CHECKED_BOX, UNCHECKED_BOX
@@ -40,6 +46,7 @@ from zim.notebook import build_notebook, Path
 from zim.plugins import PluginClass
 from zim.plugins import WindowExtension
 from zim.plugins import extends
+
 try:
     import ipdb
 except ImportError:
@@ -60,7 +67,6 @@ if not os.path.isfile(CLIENT_SECRET_FILE):
 
 
 class GoogletasksPlugin(PluginClass):
-
     plugin_info = {
         'name': _('Google Tasks'),
         'description': _('''\
@@ -76,9 +82,9 @@ See https://github.com/e3rd/zim-plugin-googletasks for more info.
 
     plugin_preferences = (
         # T: label for plugin preferences dialog
-        ('startup_check','bool',_('Fetch new tasks on Zim startup'), True),
+        ('startup_check', 'bool', _('Fetch new tasks on Zim startup'), True),
         ('page', 'string', _('What page should be used to be updated by plugin? If not set, homepage is used'), ""),
-        )
+    )
 
 
 class GoogletasksCommand(NotebookCommand, GtkCommand):
@@ -88,18 +94,19 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
     preferences = ConfigManager().get_config_dict('preferences.conf')['GoogletasksPlugin'].dump()
 
     def run(self):
-        ntbName = self.get_notebook_argument()[0] or self.get_default_or_only_notebook()
+        ntb_name = self.get_notebook_argument()[0] or self.get_default_or_only_notebook()
         for window in ZIM_APPLICATION._windows:
-            if window.ui.notebook.uri == ntbName.uri:
+            if window.ui.notebook.uri == ntb_name.uri:
                 ui = window.ui;
                 break
         else:
             ui = None
-	#not needed since 0.67rc1 reload = (lambda: ui.reload_page()) if ui else lambda: None # function exists only if zim is open
-        ntb, _ = build_notebook(ntbName)
-	#reload() # save current user's work, if zim's open
-	GoogletasksController(notebook=ntb, preferences=GoogletasksCommand.preferences).fetch() # add new lines
-	#reload() # save new lines
+        # not needed since 0.67rc1 reload = (lambda: ui.reload_page()) if ui else lambda: None # function exists only if zim is open
+        ntb, _ = build_notebook(ntb_name)
+        # reload() # save current user's work, if zim's open
+        GoogletasksController(notebook=ntb, preferences=GoogletasksCommand.preferences).fetch()  # add new lines
+    # reload() # save new lines
+
 
 class GoogleCalendarApi(object):
     permission_write_file = os.path.join(WORKDIR, 'googletasks_oauth_write.json')
@@ -136,22 +143,23 @@ class GoogleCalendarApi(object):
         credentials = store.get()
         if not credentials or credentials.invalid:
             flow = client.flow_from_clientsecrets(CLIENT_SECRET_FILE, self.scope)
-            flow.user_agent = APPLICATION_NAME # Googletasks2zimPlugin.plugin_info["name"]
+            flow.user_agent = APPLICATION_NAME  # Googletasks2zimPlugin.plugin_info["name"]
             argv = sys.argv
-            sys.argv = sys.argv[:1] # tools.run_flow unfortunately parses arguments and would die from any zim args
+            sys.argv = sys.argv[:1]  # tools.run_flow unfortunately parses arguments and would die from any zim args
             credentials = tools.run_flow(flow, store)
             self.info('Storing credentials to ' + self.credential_path)
             sys.argv = argv
         return credentials
 
 
-
 def monkeypatch_method(cls):
     """ decorator used for extend features of a method"""
+
     def decorator(func):
         setattr(cls, func.__name__ + "_original", getattr(cls, func.__name__))
         setattr(cls, func.__name__, func)
         return func
+
     return decorator
 
 
@@ -182,16 +190,17 @@ class GoogletasksWindow(WindowExtension):
 
     gui = "";
 
-    @action(_('Google Tasks')) # T: menu item
+    @action(_('Google Tasks'))  # T: menu item
     def googletasks_menu(self):
         pass
 
-    def __init__(self, * args, ** kwargs):
-        WindowExtension.__init__(self, * args, ** kwargs) #super(WindowExtension, self).__init__(*args, **kwargs)
+    def __init__(self, *args, **kwargs):
+        WindowExtension.__init__(self, *args, **kwargs)  # super(WindowExtension, self).__init__(*args, **kwargs)
         if self.plugin.preferences['startup_check']:
             GoogletasksCommand("--plugin googletasks").run()
         controller = self.controller = GoogletasksController(window=self.window, preferences=self.plugin.preferences)
-        #self.import_tasks()
+
+        # self.import_tasks()
 
         @monkeypatch_method(TextBuffer)
         def set_bullet(self, row, bullet):
@@ -202,9 +211,7 @@ class GoogletasksWindow(WindowExtension):
                     controller.task_checked(taskid, bullet)
             self.set_bullet_original(row, bullet)
 
-
-
-    @action(_('_Task from cursor or selection...'), accelerator='<ctrl><alt><shift>g') # T: menu item
+    @action(_('_Task from cursor or selection...'), accelerator='<ctrl><alt><shift>g')  # T: menu item
     def send_as_task(self):
         """ cut current text and call send to tasks dialog """
         buffer = self.window.pageview.view.get_buffer()
@@ -214,7 +221,7 @@ class GoogletasksWindow(WindowExtension):
             lineI = buffer.get_insert_iter().get_line()
             startiter = buffer.get_iter_at_line(lineI)
 
-            #import ipdb; ipdb.set_trace()
+            # import ipdb; ipdb.set_trace()
             while True:
                 lineI += 1
                 s = None
@@ -222,8 +229,8 @@ class GoogletasksWindow(WindowExtension):
                     s = self.controller.readline(lineI)
                 finally:
                     if (not s or not s.strip() or s.startswith("\n") or
-                            s.startswith("\xef\xbf\xbc ") or # begins with a checkbox
-                            TASKANCHOR_SYMBOL.encode("utf-8") in s): # not s.startswith("\t")
+                            s.startswith("\xef\xbf\xbc ") or  # begins with a checkbox
+                            TASKANCHOR_SYMBOL.encode("utf-8") in s):  # not s.startswith("\t")
                         lineI -= 1
                         break
 
@@ -231,16 +238,16 @@ class GoogletasksWindow(WindowExtension):
             enditer.forward_to_line_end()
             buffer.select_range(startiter, enditer)
 
-        if buffer.get_selection_bounds(): # a task is selected
+        if buffer.get_selection_bounds():  # a task is selected
             task = self.controller.readTaskFromSelection()
             self.add_new_task(task=task)
 
-    @action(_('_Add new task...')) # T: menu item
+    @action(_('_Add new task...'))  # T: menu item
     def add_new_task(self, task={}):
         # gui window
         self.gui = GoogletasksNewtaskDialog(self.window.ui, _('Search'), defaultwindowsize=(300, -1))
         self.gui.setController(self.controller)
-        self.gui.resize(300, 100) # reset size
+        self.gui.resize(300, 100)  # reset size
         self.gui.task = task
 
         # title
@@ -261,21 +268,18 @@ class GoogletasksWindow(WindowExtension):
         hbox = gtk.HBox(spacing=1)
         hbox.pack_start(self.gui.inputDue)
         hbox.pack_start(self.gui.labelDue)
-        #self.gui.vbox.pack_start(self.gui.inputDue, False)
+        # self.gui.vbox.pack_start(self.gui.inputDue, False)
         self.gui.vbox.pack_start(hbox, False)
 
         # we cant tab out from notes textarea field, hence its placed under date
         self.gui.vbox.pack_start(self.gui.inputNotes, False)
-
-
-
 
         # 9 postponing buttons
         hbox = gtk.HBox()
         self.gui.vbox.add(hbox)
         hbox.pack_start(gtk.Label(('Days: ')), False)
         for i in range(1, 10):
-            button = gtk.Button(label="_{} {}".format(i,self.controller.getTime(addDays=i, mode="day")))
+            button = gtk.Button(label="_{} {}".format(i, self.controller.getTime(addDays=i, mode="day")))
             button.connect("clicked", self.gui.postpone, i)
             hbox.pack_start(button, False)
 
@@ -285,22 +289,22 @@ class GoogletasksWindow(WindowExtension):
         if "notes" in task:
             self.gui.inputNotes.get_buffer().set_text(task["notes"])
         if "due" in task:
-            logger.error("Not yet implemented") # XX
+            logger.error("Not yet implemented")  # XX
 
         # display window
         self.gui.show_all()
 
-    @action(_('_Claim read only access')) # T: menu item
+    @action(_('_Claim read only access'))  # T: menu item
     def permission_readonly(self):
         GoogleCalendarApi().getService()
 
-    @action(_('_Claim write access')) # T: menu item
+    @action(_('_Claim write access'))  # T: menu item
     def permission_write(self):
         GoogleCalendarApi().getService(write_access=True)
 
-    @action(_('_Import new tasks'), accelerator='<ctrl><alt>g') # T: menu item
+    @action(_('_Import new tasks'), accelerator='<ctrl><alt>g')  # T: menu item
     def import_tasks(self):
-        self.controller.fetch()
+        self.controller.fetch(force=True)
 
     def update_date(self, _):
         try:
@@ -309,8 +313,9 @@ class GoogletasksWindow(WindowExtension):
             day = INVALID_DAY
         self.gui.labelDue.set_text(day)
 
+
 class GoogletasksNewtaskDialog(Dialog):
-    def _loadTask(self):
+    def _load_task(self):
         try:
             o = self.inputNotes.get_buffer()
             self.task["notes"] = o.get_text(*o.get_bounds())
@@ -331,11 +336,11 @@ class GoogletasksNewtaskDialog(Dialog):
         else:
             self.do_response_cancel()
 
-    def do_response_ok(self):        
+    def do_response_ok(self):
         if self.labelDue.get_text() == INVALID_DAY:
             return False
-        self._loadTask()
-        self.destroy() # immediately close (so that we wont hit Ok twice)
+        self._load_task()
+        self.destroy()  # immediately close (so that we wont hit Ok twice)
         if not self.controller.submit_task(task=self.task):
             self.do_response_cancel()
         return True
@@ -355,17 +360,17 @@ class GoogletasksNewtaskDialog(Dialog):
         self.inputDue.set_text(self.controller.getTime(addDays=number, mode="dateonly"))
         self.do_response_ok()
 
+
 class GoogletasksController(object):
 
-    def __init__(self, window=None, notebook=None, preferences = None):
+    def __init__(self, window=None, notebook=None, preferences=None):
         self.window = window
         self.notebook = notebook
         self.preferences = preferences
         if not self.notebook and self.window:
             self.notebook = self.window.ui.notebook
-        #self.page = self.notebook.get_page(Path(self.preferences["page"])) if self.preferences["page"] else self.notebook.get_home_page()
-        self.page = self.notebook.get_page(Path(self.preferences["page"])) if self.preferences["page"] else self.notebook.get_home_page()
-        #self.page = self.notebook.get_home_page()
+        self.page = self.notebook.get_page(Path(self.preferences["page"])) if self.preferences[
+            "page"] else self.notebook.get_home_page()
         logger.debug("Google tasks page: {} ".format(self.page))
 
     def task_checked(self, taskid, bullet):
@@ -373,9 +378,9 @@ class GoogletasksController(object):
         service = GoogleCalendarApi().getService(write_access=True)
         task = {"status": "completed" if bullet is CHECKED_BOX else "needsAction"}
         try:
-            if bullet is CHECKED_BOX: # small patch will be sufficient
+            if bullet is CHECKED_BOX:  # small patch will be sufficient
                 result = service.tasks().patch(tasklist='@default', task=taskid, body=task).execute()
-            else: # we need to delete the automatically generated completed field, need to do a whole update
+            else:  # we need to delete the automatically generated completed field, need to do a whole update
                 task = service.tasks().get(tasklist='@default', task=taskid).execute()
                 del task["completed"]
                 task["status"] = "needsAction"
@@ -388,7 +393,7 @@ class GoogletasksController(object):
 
     def submit_task(self, task={}):
         """ Upload task to Google server """
-        if "due" not in task: # fallback - default is to postpone the task by a day
+        if "due" not in task:  # fallback - default is to postpone the task by a day
             task["due"] = self.getTime(addDays=1, mode="morning")
 
         service = GoogleCalendarApi().getService(write_access=True)
@@ -403,15 +408,15 @@ class GoogletasksController(object):
         except:
             self.info('Error in communication with Google Tasks: {}'.format(sys.exc_info()[1]))
             return False
-                                    
-        #with open(CACHEFILE, "rb+") as f: #15
+
+        # with open(CACHEFILE, "rb+") as f: #15
         #    recentItemIds = pickle.load(f)
         #    recentItemIds.remove(result["etag"])
         #    f.seek(0)
         #    pickle.dump(recentItemIds, f)
         #    f.write(output)
         #    f.truncate()                                
-    
+
         return True
 
     def getTime(self, addDays=0, mode=None, fromString=None, usedate=None, pastDates=True):
@@ -420,9 +425,10 @@ class GoogletasksController(object):
         """
         dtnow = usedate if usedate else dateutil.parser.parse(fromString) if fromString else datetime.datetime.now()
         if addDays:
-            dtnow += datetime.timedelta(addDays, 0)        
-        if not pastDates and dtnow.isoformat()[:10] < datetime.datetime.now().isoformat()[:10]: # why isoformat? something with tzinfo
-            raise ValueError            
+            dtnow += datetime.timedelta(addDays, 0)
+        if not pastDates and dtnow.isoformat()[:10] < datetime.datetime.now().isoformat()[
+                                                      :10]:  # why isoformat? something with tzinfo
+            raise ValueError
         if mode:
             try:
                 return {
@@ -437,15 +443,12 @@ class GoogletasksController(object):
                 logger.error("Wrong time mode {}!".format(mode))
         return dtnow.isoformat()
 
-
     def info(self, text):
         """ Echo to the console and status bar. """
         text = "Googletasks \ " + text
         logger.info(text)
         if self.window:
             self.window.statusbar.push(0, text)
-
-
 
     def _get_new_items(self, dueMin):
         """ Download new tasks from google server. """
@@ -472,7 +475,7 @@ class GoogletasksController(object):
                 logger.info(item)
                 c += 1
                 text += self.getTaskText(item) + "\n"
-            self.info("New tasks: {}, page: {}".format(c,self.page.get_title()))
+            self.info("New tasks: {}, page: {}".format(c, self.page.get_title()))
         return text
 
     def getTaskText(self, task):
@@ -483,10 +486,11 @@ class GoogletasksController(object):
         if "title" not in task:
             logger.error("Task text is missing")
             return False
-        s += task['title'][4:] if task['title'].startswith("[ ] ") else task['title'] # we dont want to have the task started with: "[ ] [ ] "
+        s += task['title'][4:] if task['title'].startswith("[ ] ") else task[
+            'title']  # we dont want to have the task started with: "[ ] [ ] "
         if task.get("notes", ""):
             s += "\n\t" + task['notes']
-        #s+="\n"
+        # s+="\n"
         return s
 
     def readline(self, lineI):
@@ -504,22 +508,20 @@ class GoogletasksController(object):
         buffer = self.window.pageview.view.get_buffer()
         task_anchor_pos = self.readline(lineI).find(TASKANCHOR_SYMBOL.encode("utf-8"))
         if task_anchor_pos > -1:
-            offset = task_anchor_pos - 2 + buffer.get_iter_at_line(lineI).get_offset() # the -2 is because of a charset mystery
+            offset = task_anchor_pos - 2 + buffer.get_iter_at_line(lineI).get_offset()  # the -2 is because of a charset mystery
             try:
                 linkdata = buffer.get_link_data(buffer.get_iter_at_offset(offset))
-                return linkdata["href"].split("gtasks://")[1] #linkdata["href"]
+                return linkdata["href"].split("gtasks://")[1]  # linkdata["href"]
             except:
                 pass
         return None
-
 
     def readTaskFromSelection(self):
         buffer = self.window.pageview.view.get_buffer()
         task = {}
 
-        #lineI = buffer.get_iter_at_offset(min([x.get_offset() for x in buffer.get_selection_bounds()])).get_line() # first line in selection
-        #task["id"] = self.getTaskId(lineI)
-
+        # lineI = buffer.get_iter_at_offset(min([x.get_offset() for x in buffer.get_selection_bounds()])).get_line() # first line in selection
+        # task["id"] = self.getTaskId(lineI)
 
         lines = get_dumper("wiki").dump(buffer.get_parsetree(buffer.get_selection_bounds()))
         match = taskAnchorTreeRe.match("".join(lines))
@@ -532,22 +534,34 @@ class GoogletasksController(object):
                 task["title"] = ""
         task["notes"] = "".join(lines[1:])
 
-        #text = buffer.get_text(*buffer.get_selection_bounds())
-        #text = taskAnchorRe.sub("", text).split("\n", 1) # XXX #5 musi to umet checknout stazeny task: text =
+        # text = buffer.get_text(*buffer.get_selection_bounds())
+        # text = taskAnchorRe.sub("", text).split("\n", 1) # XXX #5 musi to umet checknout stazeny task: text =
 
-        #task["title"] = text[0]
-        #task["notes"]="".join(text[1:])
+        # task["title"] = text[0]
+        # task["notes"]="".join(text[1:])
 
-        buffer.delete(*buffer.get_selection_bounds()) # cuts the task
+        buffer.delete(*buffer.get_selection_bounds())  # cuts the task
         return task
 
+    def fetch(self, force=False):
+        """ Get the new tasks and insert them into page
+        :type force: Cancels the action if False and cache file have been accessed recently.
+        """
 
-    def fetch(self):
-        """ Get the new tasks and insert them into page"""
-        
         # Load the list of recently seen tasks
         self.itemIds = set()
         if os.path.isfile(CACHEFILE):
+            if not force:
+                MAX_HOURS = 3
+                now = time()
+                last_time = os.path.getmtime(CACHEFILE)
+                if now - last_time < MAX_HOURS * 3600 and \
+                        datetime.datetime.now().day is datetime.datetime.fromtimestamp(last_time).day:
+                    # if checked in last hours and there wasn't midnight (new tasks time) since then
+                    print("RETURNING :)")
+                    return
+                else:
+                    print("NOT RETURNING :)")
             with open(CACHEFILE, "rb") as f:
                 self.recentItemIds = pickle.load(f)
             dueMin = self.getTime(usedate=datetime.datetime.fromtimestamp(os.path.getmtime(CACHEFILE)), mode="midnight")
@@ -558,6 +572,7 @@ class GoogletasksController(object):
         # Do internal fetching of new tasks text
         text = self._get_new_items(dueMin)
         if not text:
+            os.utime(CACHEFILE, None)  # we touch the file
             return
 
         # Insert tasks string into page
@@ -565,7 +580,7 @@ class GoogletasksController(object):
         contents = []
         for line in self.page.dump("wiki"):
             contents.append(line)
-            if line.strip() == "": # ignore first empty line
+            if line.strip() == "":  # ignore first empty line
                 counter -= 1
             if counter == 0:
                 contents.append(text)

@@ -8,6 +8,7 @@ Same as for the other plugins, but needs some Google Tasks API dependencies.
   * something like `%appdata%\zim\data\zim\plugins` in Win, or `~/.local/share/zim/plugins/` in Linux
 * You enable the plugin in Zim/Edit/Preferences/Plugins/ check mark Google tasks.
 * Go to Tools / Google Tasks / Import new tasks
+* When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched.
 * Enjoy
 
 ### Optional
