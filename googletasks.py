@@ -453,11 +453,14 @@ class GoogletasksController(object):
     def _get_new_items(self, dueMin):
         """ Download new tasks from google server. """
         service = GoogleCalendarApi().getService()
-        results = service.tasks().list(maxResults=999,
-                                       tasklist="@default",
-                                       showCompleted=False,
-                                       dueMin=dueMin,
-                                       dueMax=self.getTime(mode="lastsec")).execute()
+        try:
+            results = service.tasks().list(maxResults=999,
+                                           tasklist="@default",
+                                           showCompleted=False,
+                                           dueMin=dueMin,
+                                           dueMax=self.getTime(mode="lastsec")).execute()
+        except httplib2.ServerNotFoundError:
+            return ""
         items = results.get('items', [])
         if not items:
             self.info('No task lists found.')
@@ -558,10 +561,7 @@ class GoogletasksController(object):
                 if now - last_time < MAX_HOURS * 3600 and \
                         datetime.datetime.now().day is datetime.datetime.fromtimestamp(last_time).day:
                     # if checked in last hours and there wasn't midnight (new tasks time) since then
-                    print("RETURNING :)")
                     return
-                else:
-                    print("NOT RETURNING :)")
             with open(CACHEFILE, "rb") as f:
                 self.recentItemIds = pickle.load(f)
             dueMin = self.getTime(usedate=datetime.datetime.fromtimestamp(os.path.getmtime(CACHEFILE)), mode="midnight")
