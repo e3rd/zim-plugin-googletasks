@@ -17,7 +17,7 @@ import httplib2
 from apiclient import discovery
 from oauth2client import client, tools
 from oauth2client.file import Storage
-from zim.actions import action
+from zim.actions import action, radio_action, radio_option
 from zim.config import XDG_DATA_HOME, ConfigManager
 from zim.formats import get_dumper
 from zim.formats.wiki import Parser
@@ -196,7 +196,13 @@ class GoogletasksWindow(MainWindowExtension):
 
     gui = "";
 
-    @action(_('Google Tasks'))  # T: menu item
+    #@action(_('Google Tasks'))  # T: menu item
+    # @action(
+    #     _('Google Tasks'),  # T: Menu title
+    #     radio_option('raz', _('_None')),  # T: Menu option for View->Pathbar
+    #     radio_option('ra', _('_Recent pages')),  # T: Menu option for View->Pathbar
+    #     menuhints='tools'
+    # )
     def googletasks_menu(self):
         pass
 
@@ -457,13 +463,15 @@ class GoogletasksController(object):
 
     def _get_new_items(self, dueMin):
         """ Download new tasks from google server. """
-        service = GoogleCalendarApi().getService()
+        service = GoogleCalendarApi().getService()        
         try:
             results = service.tasks().list(maxResults=999,
                                            tasklist="@default",
                                            showCompleted=False,
                                            dueMin=dueMin,
-                                           dueMax=self.get_time(mode="lastsec")).execute()
+                                           #dueMax=self.get_time(mode="lastsec"),
+                                           dueMax=self.get_time(addDays=1, mode="midnight") #17
+                                           ).execute()
         except httplib2.ServerNotFoundError:
             return ""
         items = results.get('items', [])
