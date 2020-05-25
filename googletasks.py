@@ -153,7 +153,7 @@ class GoogleCalendarApi(object):
             argv = sys.argv
             sys.argv = sys.argv[:1]  # tools.run_flow unfortunately parses arguments and would die from any zim args
             credentials = tools.run_flow(flow, store)
-            self.info('Storing credentials to ' + self.credential_path)
+            GoogletasksController.info('Storing credentials to ' + self.credential_path)
             sys.argv = argv
         return credentials
 
@@ -375,7 +375,7 @@ class GoogletasksNewtaskDialog(Dialog):
 class GoogletasksController(object):
 
     def __init__(self, window=None, notebook=None, preferences=None):
-        self.window = window
+        GoogletasksController.window = self.window = window
         self.notebook = notebook
         self.preferences = preferences
         if not self.notebook and self.window:
@@ -454,12 +454,13 @@ class GoogletasksController(object):
                 logger.error("Wrong time mode {}!".format(mode))
         return dtnow.isoformat()
 
-    def info(self, text):
+    @staticmethod
+    def info(text):
         """ Echo to the console and status bar. """
         text = "Googletasks \ " + text
         logger.info(text)
-        if self.window:
-            self.window.statusbar.push(0, text)
+        if GoogletasksController.window:
+            GoogletasksController.window.statusbar.push(0, text)
 
     def _get_new_items(self, dueMin):
         """ Download new tasks from google server. """
@@ -566,7 +567,8 @@ class GoogletasksController(object):
 
         # Load the list of recently seen tasks
         self.itemIds = set()
-        if os.path.isfile(CACHEFILE):
+        cache_exists = os.path.isfile(CACHEFILE)
+        if cache_exists:
             if not force:
                 MAX_HOURS = 3
                 now = time()
@@ -585,7 +587,8 @@ class GoogletasksController(object):
         # Do internal fetching of new tasks text
         text = self._get_new_items(dueMin)
         if not text:
-            os.utime(CACHEFILE, None)  # we touch the file
+            if cache_exists:
+                os.utime(CACHEFILE, None)  # we touch the file
             return
 
         # Insert tasks string into page
