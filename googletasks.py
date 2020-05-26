@@ -17,7 +17,7 @@ from apiclient import discovery
 from gi.repository import Gtk
 from oauth2client import client, tools
 from oauth2client.file import Storage
-from zim.actions import action
+from zim.actions import action, get_gtk_actiongroup, ActionMethod
 from zim.config import XDG_DATA_HOME, ConfigManager
 from zim.formats import get_dumper
 from zim.formats.wiki import Parser
@@ -160,47 +160,24 @@ def monkeypatch_method(cls):
 
 
 class GoogletasksWindow(MainWindowExtension):
-    s = ""
-    if not GoogleCalendarApi.service_obtainable():
-        s += "<menuitem action='permission_readonly'/>"
-    if not GoogleCalendarApi.service_obtainable(write_access=True):
-        s += "<menuitem action='permission_write'/>"
-
-    uimanager_xml = '''
-    <ui>
-    <menubar name='menubar'>
-            <menu action='tools_menu'>
-                <menu action='googletasks_menu'>
-                    <placeholder name='plugin_items'>
-                            <menuitem action='import_tasks'/>
-                            <menuitem action='add_new_task'/>
-                            <menuitem action='send_as_task'/>
-                            ''' + s + '''
-                    </placeholder>
-                </menu>
-            </menu>
-    </menubar>
-    </ui>
-    '''
-
     gui = ""
 
-    # @action(_('Google Tasks'))  # T: menu item
-    # @action(
-    #     _('Google Tasks'),  # T: Menu title
-    #     radio_option('raz', _('_None')),  # T: Menu option for View->Pathbar
-    #     radio_option('ra', _('_Recent pages')),  # T: Menu option for View->Pathbar
-    #     menuhints='tools'
-    # )
-    def googletasks_menu(self):
-        pass
+    # @action(_('Google Tasks'), menuhints="view")  # T: menu item
+    # def googletasks_menu(self):
+    #    pass
 
     def __init__(self, *args, **kwargs):
+        self.label_object = None
+
         MainWindowExtension.__init__(self, *args, **kwargs)  # super(WindowExtension, self).__init__(*args, **kwargs)
         if self.plugin.preferences['startup_check']:
+            # XX What it is good for? This means GoogletasksController launches twice which is probably not ideal
             GoogletasksCommand("--plugin googletasks").run()
         controller = self.controller = GoogletasksController(window=self.window, preferences=self.plugin.preferences)
-        self.label_object = None
+
+        # group = get_gtk_actiongroup(self)
+        # group.add_actions(MENU_ACTIONS)
+        # self._uimanager.insert_action_group(group, 0)
 
         # noinspection PyShadowingNames
         @monkeypatch_method(TextBuffer)
@@ -211,6 +188,51 @@ class GoogletasksWindow(MainWindowExtension):
                 if taskid:
                     controller.task_checked(taskid, bullet)
             self.set_bullet_original(row, bullet, indent=indent)
+
+    def _add_actions(self, uimanager):
+        """ Set up menu items.
+            Here we override parent function that adds menu items.
+            XX It would be much nicer if we could define those via @action menuhint decorator, not possible now.
+            So that we must define XML ourselves.
+
+            If we did not override, all the items would be placed directly in Tools, not in Tools / Google Tasks.
+        """
+
+        def get_actions(obj):
+            import inspect
+            return inspect.getmembers(obj.__class__, lambda m: isinstance(m, ActionMethod))
+
+        actions = get_actions(self)
+        if actions:
+            self._uimanager = uimanager
+
+            actiongroup = get_gtk_actiongroup(self)
+            uimanager.insert_action_group(actiongroup, 0)
+
+            # Set up menu items. Here we change parent function behaviour.
+            s = []
+            if GoogleCalendarApi.service_obtainable():
+                s.append("<menuitem action='permission_readonly'/>")
+            if GoogleCalendarApi.service_obtainable(write_access=True):
+                s.append("<menuitem action='permission_write'/>")
+            xml = '''
+                    <ui>
+                    <menubar name='menubar'>
+                            <menu action='tools_menu'>
+                                <menu action='googletasks_menu'>
+                                    <menuitem action='import_tasks'/>
+                                    <menuitem action='add_new_task'/>
+                                    <menuitem action='send_as_task'/>
+                                    ''' + "\n".join(s) + '''                            
+                                </menu>
+                            </menu>
+                    </menubar>
+                    </ui>
+                    '''
+
+            MENU_ACTIONS = (('googletasks_menu', None, _('_Google tasks')),)
+            actiongroup.add_actions(MENU_ACTIONS)
+            self._uimanager.add_ui_from_string(xml)
 
     @action(_('_Task from cursor or selection...'), accelerator='<ctrl><alt><shift>g')  # T: menu item
     def send_as_task(self):
@@ -383,6 +405,7 @@ class GoogletasksController:
         self.preferences = preferences
         if not self.notebook and self.window:
             self.notebook = self.window.notebook  # ui.notebook
+        print("CON TROLLER INIT*******************")
         self._refresh_page()
         logger.debug("Google tasks page: {} ".format(self.page))
 
