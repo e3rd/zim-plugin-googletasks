@@ -381,7 +381,7 @@ class GoogletasksController(object):
         if not self.notebook and self.window:
             self.notebook = self.window.notebook #ui.notebook
         self.page = self.notebook.get_page(Path(self.preferences["page"])) if self.preferences[
-            "page"] else self.notebook.get_home_page()
+            "page"] else self.notebook.get_home_page()  # XX this should be moved to fetching part, now we need a restart before changing page has effect
         logger.debug("Google tasks page: {} ".format(self.page))
 
     def task_checked(self, taskid, bullet):
@@ -592,15 +592,16 @@ class GoogletasksController(object):
             return
 
         # Insert tasks string into page
-        counter = 1
+        appended = False
         contents = []
         for line in self.page.dump("wiki"):
             contents.append(line)
-            if line.strip() == "":  # ignore first empty line
-                counter -= 1
-            if counter == 0:
+            if line.strip() == "" and not appended:  # insert after first empty line
+                appended = True
                 contents.append(text)
-                counter = -1
+        if not appended:  # or insert at the end of the page text
+            contents.append(text)
+
         bounds = None
         if self.window and self.window.pageview.get_page().name is self.page.name:
             # HP is current page - we use GTK buffers, caret stays at position
