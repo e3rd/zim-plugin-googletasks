@@ -54,7 +54,7 @@ WORKDIR = str(XDG_DATA_HOME.subdir(('zim', 'plugins')))
 CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 APPLICATION_NAME = 'googletasks2zim'
 TASK_ANCHOR_SYMBOL = u"\u270b"
-taskAnchorTreeRe = re.compile(r'(\[ \]\s)?\[\[gtasks://([^|]*)\|' + TASK_ANCHOR_SYMBOL + r'\]\]\s?(.*)')
+taskAnchorTreeRe = re.compile(r'(\[.\]\s)?\[\[gtasks://([^|]*)\|' + TASK_ANCHOR_SYMBOL + r'\]\]\s?(.*)')
 INVALID_DAY = "N/A"
 
 
@@ -77,7 +77,8 @@ See https://github.com/e3rd/zim-plugin-googletasks for more info.
 
     plugin_notebook_properties = (
         # T: label for plugin preferences dialog
-        ('startup_check', 'bool', _('Fetch new tasks on Zim startup'), True),
+        ('startup_check', 'bool', _('Import new tasks on Zim startup'), True),
+        ('auto_sync', 'bool', _('Sync tasks status before import'), False),
         ('page', 'string', _('Page to be updated (empty = homepage)'), ""),
         ('tasklist', 'string', _('Task list name on server (empty = default)'), ""),
     )
@@ -194,8 +195,6 @@ class GoogletasksWindow(MainWindowExtension):
     def _add_actions(self, uimanager):
         """ Set up menu items.
             Here we override parent function that adds menu items.
-            XX It would be much nicer if we could define those via @action menu hint decorator, not possible now.
-            So that we must define XML ourselves.
 
             If we did not override, all the items would be placed directly in Tools, not in Tools / Google Tasks.
         """
@@ -236,6 +235,7 @@ class GoogletasksWindow(MainWindowExtension):
                             <menu action='tools_menu'>
                                 <menu action='googletasks_menu'>
                                     <menuitem action='import_tasks'/>
+                                    <menuitem action='sync_status'/>
                                     <menuitem action='add_new_task'/>
                                     <menuitem action='send_as_task'/>
                                     ''' + "\n".join(permissions) + '''
@@ -350,7 +350,13 @@ class GoogletasksWindow(MainWindowExtension):
 
     @action(_('_Import new tasks'), accelerator='<ctrl><alt>g')  # T: menu item
     def import_tasks(self):
+        if self.controller.preferences["auto_sync"]:
+            self.sync_status()
         self.controller.fetch(force=True)
+
+    @action(_('_Sync tasks status from server'))  # T: menu item
+    def sync_status(self):
+        self.controller.sync_bullets_from_server()
 
     @action(_('_Refresh task lists'))  # T: menu item
     def refresh_task_lists(self):
@@ -454,6 +460,7 @@ class GoogletasksController:
         def _(_):
             self.preferences["tasklist"] = title
             self.info(f"Task list changed to {title}")
+
         return _
 
     def task_checked(self, task_id, bullet):
@@ -538,27 +545,10 @@ class GoogletasksController:
             self.window.statusbar.push(0, text)
 
     def _get_new_items(self, due_min):
-        """ Download new tasks from google server. """
-        service = self.calendar_api.get_service()
-        try:
-            results = service.tasks().list(maxResults=999,
-                                           tasklist=self.tasklist,
-                                           showCompleted=False,
-                                           dueMin=due_min,
-                                           dueMax=self.get_time(add_days=1, mode="midnight")  # for format see #17
-                                           ).execute()
-        except LookupError as e:
-            self.info(e)
-            return False
-        except httplib2.ServerNotFoundError:
-            return False
-        except Error as e:
-            self.info(e)
-            return False
-        items = results.get('items', [])
-        if not items:
-            self.info('No tasks found.')
-            return False
+        """ Download new tasks from google server.
+            In case of an error or no tasks found, informs user in the status bar and raises LookupError.
+        """
+        items = self._read_task_list(due_min)
 
         tasks = []
         items_ids = set()
@@ -567,7 +557,7 @@ class GoogletasksController:
                 if self.get_time(from_string=item["due"], mode="object").date() \
                         >= self.get_time(mode="object").date():
                     items_ids.add(item["etag"])
-                logger.debug('Skipping {}.'.format(item['title']))
+                logger.debug('Text already imported {}.'.format(item['title']))
                 continue
             items_ids.add(item["etag"])
             logger.info("Appending {}.".format(item["title"]))
@@ -576,10 +566,31 @@ class GoogletasksController:
         self.cache.items_ids = items_ids
         return tasks
 
+    def _read_task_list(self, due_min, show_completed=False, service=None):
+        """ In case of an error or no tasks found, informs user in the status bar and raises LookupError. """
+        if not service:
+            service = self.calendar_api.get_service()
+        try:
+            results = service.tasks().list(maxResults=99,
+                                           tasklist=self.tasklist,
+                                           showCompleted=show_completed,
+                                           dueMin=due_min,
+                                           dueMax=self.get_time(add_days=1, mode="midnight")  # for format see #17
+                                           ).execute()
+        except (LookupError, httplib2.ServerNotFoundError, Error) as e:
+            # self.tasklist property has problem, raises LookupError
+            self.info(e)
+            raise LookupError
+        items = results.get('items', [])
+        if not items:
+            self.info('No tasks found.')
+            raise LookupError
+        return items
+
     @staticmethod
     def get_task_text(task):
         """ formats task object to zim markup """
-        s = "[ ] "
+        s = "[*] " if task.get("completed") else "[ ] "
         if task.get("id", ""):
             s += "[[gtasks://{}|{}]] ".format(task["id"], TASK_ANCHOR_SYMBOL)
         if "title" not in task:
@@ -593,7 +604,7 @@ class GoogletasksController:
 
     @classmethod
     def readline(cls, line_i, buffer):
-        """ this crazy construct just reads a line in a page """
+        """ this crazy construct just reads a line at position in a page """
         text_iter = buffer.get_iter_at_line(line_i)
         start = buffer.get_iter_at_offset(text_iter.get_offset())
         if text_iter.forward_to_line_end():
@@ -622,7 +633,9 @@ class GoogletasksController:
         lines = get_dumper("wiki").dump(buffer.get_parsetree(buffer.get_selection_bounds()))
         match = taskAnchorTreeRe.match("".join(lines))
         if match:
-            task["id"], task["title"] = match.group(2), match.group(3).split("\n", 1)[0]
+            task = {"id": match.group(2),
+                    "title": match.group(3).split("\n", 1)[0],
+                    "completed": match.group(1).startswith("[*]")}
         else:
             try:
                 task["title"] = lines[0].strip()
@@ -663,13 +676,12 @@ class GoogletasksController:
             due_min = self.get_time(mode="midnight")
 
         # Do internal fetching of new tasks text
-        tasks = self._get_new_items(due_min)
-        # Refreshes page from current configuration
-        if tasks is False:
+        try:
+            tasks = self._get_new_items(due_min)
+        except LookupError:
             return
-        page = self.notebook.get_page(ZimPath(self.preferences["page"])) if self.preferences["page"] \
-            else self.notebook.get_home_page()
-
+        # Refreshes page from current configuration
+        page = self._get_page()
         s = " from list " + self.preferences['tasklist'] if self.preferences['tasklist'] else ""
         self.info(f"New tasks{s}: {len(tasks)}, page: {page.get_title()}")
         if not tasks:
@@ -689,6 +701,19 @@ class GoogletasksController:
         if not appended:  # or insert at the end of the page text
             contents.append(text)
 
+        self._store_to_page(contents, page)
+
+        # Save the list of successfully imported task
+        self.cache.save()
+        # with open(CACHE_FILE, "wb") as f:
+        #     pickle.dump(self.item_ids, f)
+
+    def _store_to_page(self, contents, page):
+        """
+
+        :param contents: [] lines of the page
+        :param page: ZimPage
+        """
         bounds = buffer = None
         if self.window and self.window.pageview.get_page().name is page.name:
             # HP is current page - we use GTK buffers, caret stays at position
@@ -697,16 +722,63 @@ class GoogletasksController:
             if not bounds:
                 i = buffer.get_insert_iter()
                 bounds = [i.get_offset()] * 2
-
         page.parse('wiki', "".join(contents))
         self.notebook.store_page(page)
         if bounds:
             buffer.select_range(buffer.get_iter_at_offset(bounds[0]), buffer.get_iter_at_offset(bounds[1]))
 
-        # Save the list of successfully imported task
-        self.cache.save()
-        # with open(CACHE_FILE, "wb") as f:
-        #     pickle.dump(self.item_ids, f)
+    def _get_page(self):
+        return self.notebook.get_page(ZimPath(self.preferences["page"])) if self.preferences["page"] \
+            else self.notebook.get_home_page()
+
+    def sync_bullets_from_server(self):
+        """ Loops tasks found on the page and un/check them according to the Google server task status."""
+
+        service = self.calendar_api.get_service()
+
+        # build status cache from last 14 days so that we have to fetch one by one as little tasks as possible
+        try:
+            cache = {task["id"]: task["status"] == "completed" for task in
+                     self._read_task_list(self.get_time(add_days=-14, mode="midnight"),
+                                          show_completed=True,
+                                          service=service)}
+        except LookupError:
+            return False
+
+        allow_single_search = True
+        unidentified_tasks = []
+        page = self._get_page()
+        contents = []
+        for line in page.dump("wiki"):
+            match = taskAnchorTreeRe.match(line)
+            if match:
+                task_id = match[2]
+                task_text = match[3]
+                completed = cache.get(task_id, None)
+
+                # perform single search if needed, this task was not fetched within the cache
+                if completed is None and allow_single_search:
+                    try:
+                        task = service.tasks().get(task=task_id, tasklist=self.tasklist).execute()
+                    except Error as e:
+                        self.info(e)
+                        unidentified_tasks.append(task_text)
+                    except (LookupError, httplib2.ServerNotFoundError) as e:
+                        self.info(e)
+                        allow_single_search = False
+                    else:
+                        completed = task["status"] == "completed"
+
+                if completed is not None:  # we know the current status, replace the line
+                    # strip "[.] " (a dot may be "*", "x", " ") from the beginning
+                    task_s_without_bullet = match[0][(len(match[1]) if match[1] else 0):]
+                    # put "[*]" or "[ ]" to the beginning
+                    line = "[{0}] {1}".format(("*" if completed else " "), task_s_without_bullet) + "\n"
+
+            contents.append(line)
+        self._store_to_page(contents, page)
+        if unidentified_tasks:
+            self.info(f"Cannot identify {len(unidentified_tasks)} tasks: " + ", ".join(unidentified_tasks))
 
     def refresh_task_lists(self):
         self.cache.load()

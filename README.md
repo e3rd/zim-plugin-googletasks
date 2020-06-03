@@ -7,7 +7,11 @@ Same as for the other plugins, but needs some Google Tasks API dependencies. Pyt
 * Put the `googletasks.py` and `googletasks_client_id.json` into the plugins folder
   * something like `%appdata%\zim\data\zim\plugins` in Win, or `~/.local/share/zim/plugins/` in Linux
 * You enable the plugin in `Zim / Edit / Preferences / Plugins` : check mark Google tasks.
-* Choose your preferences at `Zim / File / Properties / Google Tasks`    
+* Choose your preferences at `Zim / File / Properties / Google Tasks`
+    * Import new tasks on Zim startup?
+    * Sync current tasks status before import automatically? (May take a long time.)
+    * Page to be updated (empty = homepage)
+    * Task list name on server (empty = default task list)
 * Go to Tools / Google Tasks / Import new tasks
 * When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched.
 * Enjoy
@@ -19,7 +23,9 @@ echo "1   5   googletasks2zim sudo su YOUR-USERNAME bash -c 'export DISPLAY=:0 &
 ```
 
 ## How the propagation works?
-When importing, the task will preserve it's Google-ID in a small link. If you complete the checkbox of zim-task, the plugin searches for this link and marks the task completed on server.
+ * When importing, the task will preserve it's Google-ID in a small link.
+ * If you complete the checkbox of zim-task, the plugin searches for this link and marks the task completed on server.
+ * If you synchronizes tasks status from server, every task on the task page will become un/checked according to the server status.
 
 ### Multiple Zim instances
 Every Zim notebook can use independent task list. If they use the same list, any task will be imported into both.
