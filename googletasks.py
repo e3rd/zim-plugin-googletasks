@@ -68,15 +68,21 @@ It preserves most of Zim formatting (notably links).
 You may create new task from inside Zim - just select some text, choose menu item Task from selection and set the date
  it should be restored in Zim from Google server.
 See https://github.com/e3rd/zim-plugin-googletasks for more info.
-(V1.0)
+(V1.1)
 '''),
         'author': "Edvard Rejthar",
     }
 
-    plugin_preferences = (
+    plugin_notebook_properties = (
         # T: label for plugin preferences dialog
         ('startup_check', 'bool', _('Fetch new tasks on Zim startup'), True),
         ('page', 'string', _('What page should be used to be updated by plugin? If not set, homepage is used'), ""),
+        # XXX add task list, default value:
+        #   If user deletes it, will they know what's the default name? Or make default empty value?
+        ('tasklist', 'string', _('Task list name on server'), "@default"),  # XXX not yet working
+
+        # XX Attention: If you are using the same task list on multiple Zim instances,
+        # if imported to one, it's not imported in the other. Should I use different task caches for different windows?
     )
 
 
@@ -104,9 +110,10 @@ class GoogleCalendarApi:
     permission_write_file = os.path.join(WORKDIR, 'googletasks_oauth_write.json')
     permission_read_file = os.path.join(WORKDIR, 'googletasks_oauth.json')
 
-    def __init__(self):
+    def __init__(self, controller):
         self.credential_path = None
         self.scope = None
+        self.controller = controller
 
     @staticmethod
     def service_obtainable(write_access=False):
@@ -143,17 +150,20 @@ class GoogleCalendarApi:
             argv = sys.argv
             sys.argv = sys.argv[:1]  # tools.run_flow unfortunately parses arguments and would die from any zim args
             credentials = tools.run_flow(flow, store)
-            GoogletasksController.info('Storing credentials to ' + self.credential_path)
+            self.controller.info('Storing credentials to ' + self.credential_path)
             sys.argv = argv
         return credentials
 
 
 def monkeypatch_method(cls):
-    """ decorator used for extend features of a method"""
+    """ Decorator used for extend features of a method
+        If it seems the methods has been already monkey patched (func.__name__ + "_original" exists), it does nothing.
+    """
 
     def decorator(func):
-        setattr(cls, func.__name__ + "_original", getattr(cls, func.__name__))
-        setattr(cls, func.__name__, func)
+        if not hasattr(cls, func.__name__ + "_original"):
+            setattr(cls, func.__name__ + "_original", getattr(cls, func.__name__))
+            setattr(cls, func.__name__, func)
         return func
 
     return decorator
@@ -162,32 +172,29 @@ def monkeypatch_method(cls):
 class GoogletasksWindow(MainWindowExtension):
     gui = ""
 
-    # @action(_('Google Tasks'), menuhints="view")  # T: menu item
-    # def googletasks_menu(self):
-    #    pass
-
     def __init__(self, *args, **kwargs):
         self.label_object = None
 
         MainWindowExtension.__init__(self, *args, **kwargs)  # super(WindowExtension, self).__init__(*args, **kwargs)
-        if self.plugin.preferences['startup_check']:
-            # XX What it is good for? This means GoogletasksController launches twice which is probably not ideal
-            GoogletasksCommand("--plugin googletasks").run()
-        controller = self.controller = GoogletasksController(window=self.window, preferences=self.plugin.preferences)
 
-        # group = get_gtk_actiongroup(self)
-        # group.add_actions(MENU_ACTIONS)
-        # self._uimanager.insert_action_group(group, 0)
+        controller = self.controller = GoogletasksController(
+            window=self.window,
+            preferences=self.plugin.notebook_properties(self.window.notebook)
+        )
+        if self.plugin.preferences['startup_check']:
+            controller.fetch()
 
         # noinspection PyShadowingNames
         @monkeypatch_method(TextBuffer)
-        def set_bullet(self, row, bullet, indent=None):
-            """ overriding of pageview.py/TextBuffer/set_bullet """
+        def set_bullet(self, line, bullet, indent=None):
+            """ Overriding of pageview.py/TextBuffer/set_bullet """
+            # Note we cannot use any private method here because when using multiple Zim windows,
+            # `controller` contains the first one always because TextBuffer.set_bullet exists only once.
             if bullet in [CHECKED_BOX, UNCHECKED_BOX]:
-                taskid = controller.get_task_id(row)
-                if taskid:
-                    controller.task_checked(taskid, bullet)
-            self.set_bullet_original(row, bullet, indent=indent)
+                task_id = controller.get_task_id(line, buffer=self)
+                if task_id:
+                    controller.task_checked(task_id, bullet)
+            self.set_bullet_original(line, bullet, indent=indent)
 
     def _add_actions(self, uimanager):
         """ Set up menu items.
@@ -215,6 +222,8 @@ class GoogletasksWindow(MainWindowExtension):
                 s.append("<menuitem action='permission_readonly'/>")
             if GoogleCalendarApi.service_obtainable(write_access=True):
                 s.append("<menuitem action='permission_write'/>")
+            if s:
+                s = ["<separator/>"] + s
             xml = '''
                     <ui>
                     <menubar name='menubar'>
@@ -248,7 +257,7 @@ class GoogletasksWindow(MainWindowExtension):
                 line_i += 1
                 s = None
                 try:
-                    s = self.controller.readline(line_i)
+                    s = self.controller.readline(line_i, buffer)
                 finally:
                     if (not s or not s.strip() or s.startswith("\n") or
                             s.startswith("\xef\xbf\xbc ") or  # begins with a checkbox
@@ -322,11 +331,11 @@ class GoogletasksWindow(MainWindowExtension):
 
     @action(_('_Claim read only access'))  # T: menu item
     def permission_readonly(self):
-        GoogleCalendarApi().get_service()
+        self.controller.calendar_api.get_service()
 
     @action(_('_Claim write access'))  # T: menu item
     def permission_write(self):
-        GoogleCalendarApi().get_service(write_access=True)
+        self.controller.calendar_api.get_service(write_access=True)
 
     @action(_('_Import new tasks'), accelerator='<ctrl><alt>g')  # T: menu item
     def import_tasks(self):
@@ -404,31 +413,31 @@ class GoogletasksController:
         self.notebook = notebook
         self.preferences = preferences
         if not self.notebook and self.window:
-            self.notebook = self.window.notebook  # ui.notebook
-        print("CON TROLLER INIT*******************")
+            self.notebook = self.window.notebook
         self._refresh_page()
         logger.debug("Google tasks page: {} ".format(self.page))
 
         self.item_ids = None
         self.recent_item_ids = None
+        self.calendar_api = GoogleCalendarApi(self)
 
     def _refresh_page(self):
         self.page = self.notebook.get_page(Path(self.preferences["page"])) if self.preferences["page"] \
             else self.notebook.get_home_page()
 
-    def task_checked(self, taskid, bullet):
+    def task_checked(self, task_id, bullet):
         """ un/mark task on Google server """
-        service = GoogleCalendarApi().get_service(write_access=True)
+        service = self.calendar_api.get_service(write_access=True)
         task = {"status": "completed" if bullet is CHECKED_BOX else "needsAction"}
         # noinspection PyBroadException
         try:
             if bullet is CHECKED_BOX:  # small patch will be sufficient
-                service.tasks().patch(tasklist='@default', task=taskid, body=task).execute()
+                service.tasks().patch(tasklist='@default', task=task_id, body=task).execute()
             else:  # we need to delete the automatically generated completed field, need to do a whole update
-                task = service.tasks().get(tasklist='@default', task=taskid).execute()
+                task = service.tasks().get(tasklist='@default', task=task_id).execute()
                 del task["completed"]
                 task["status"] = "needsAction"
-                service.tasks().update(tasklist='@default', task=taskid, body=task).execute()
+                service.tasks().update(tasklist='@default', task=task_id, body=task).execute()
         except Exception:
             self.info('Error in communication with Google Tasks: {}'.format(sys.exc_info()[1]))
             return False
@@ -442,7 +451,7 @@ class GoogletasksController:
         if "due" not in task:  # fallback - default is to postpone the task by a day
             task["due"] = self.get_time(add_days=1, mode="morning")
 
-        service = GoogleCalendarApi().get_service(write_access=True)
+        service = self.calendar_api.get_service(write_access=True)
 
         # noinspection PyBroadException
         try:
@@ -455,15 +464,6 @@ class GoogletasksController:
         except Exception:
             self.info('Error in communication with Google Tasks: {}'.format(sys.exc_info()[1]))
             return False
-
-        # with open(CACHEFILE, "rb+") as f: #15
-        #    recent_item_ids = pickle.load(f)
-        #    recent_item_ids.remove(result["etag"])
-        #    f.seek(0)
-        #    pickle.dump(recent_item_ids, f)
-        #    f.write(output)
-        #    f.truncate()                                
-
         return True
 
     @staticmethod
@@ -491,17 +491,16 @@ class GoogletasksController:
                 logger.error("Wrong time mode {}!".format(mode))
         return dtnow.isoformat()
 
-    @staticmethod
-    def info(text):
+    def info(self, text):
         """ Echo to the console and status bar. """
         text = "[Googletasks] " + text
         logger.info(text)
-        if GoogletasksController.window:
-            GoogletasksController.window.statusbar.push(0, text)
+        if self.window:
+            self.window.statusbar.push(0, text)
 
     def _get_new_items(self, due_min):
         """ Download new tasks from google server. """
-        service = GoogleCalendarApi().get_service()
+        service = self.calendar_api.get_service()
         try:
             results = service.tasks().list(maxResults=999,
                                            tasklist="@default",
@@ -548,9 +547,9 @@ class GoogletasksController:
             s += "\n" + task['notes']
         return s
 
-    def readline(self, line_i):
+    @classmethod
+    def readline(cls, line_i, buffer):
         """ this crazy construct just reads a line in a page """
-        buffer = self.window.pageview.textview.get_buffer()
         textiter = buffer.get_iter_at_line(line_i)
         start = buffer.get_iter_at_offset(textiter.get_offset())
         if textiter.forward_to_line_end():
@@ -559,9 +558,9 @@ class GoogletasksController:
             end = start
         return buffer.get_slice(start, end, include_hidden_chars=True)
 
-    def get_task_id(self, line_i):
-        buffer = self.window.pageview.textview.get_buffer()
-        task_anchor_pos = self.readline(line_i).find(TASKANCHOR_SYMBOL)
+    @classmethod
+    def get_task_id(cls, line_i, buffer):
+        task_anchor_pos = cls.readline(line_i, buffer).find(TASKANCHOR_SYMBOL)
         if task_anchor_pos > -1:
             offset = task_anchor_pos + buffer.get_iter_at_line(line_i).get_offset()
             # noinspection PyBroadException
@@ -593,6 +592,9 @@ class GoogletasksController:
     def fetch(self, force=False):
         """ Get the new tasks and insert them into page
         :type force: Cancels the action if False and cache file have been accessed recently.
+
+        XX Add menu item "Import all, even once imported from the past" ?
+        XX Add plugin option "import even completed tasks" ?
         """
 
         # Load the list of recently seen tasks
