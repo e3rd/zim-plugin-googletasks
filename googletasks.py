@@ -15,6 +15,7 @@ import dateutil.parser
 import httplib2
 import jsonpickle
 from apiclient import discovery
+from dateutil.relativedelta import relativedelta
 from gi.repository import Gtk
 from googleapiclient.errors import Error
 from oauth2client import client, tools
@@ -79,11 +80,20 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
 
     plugin_notebook_properties = (
         # T: label for plugin preferences dialog
-        ('startup_check', 'bool', _('Import new tasks on Zim startup'), True),
-        ('auto_sync', 'bool', _('Sync tasks status before import'), False),
+        ('startup_check', 'bool', _('Import new tasks on Zim startup'
+                                    '\nIncludes today\'s or since last time due date tasks'), True),
+        ('auto_sync', 'bool', _('Sync tasks status before import'
+                                '\nMay take a long time, notably if tasks on the page are older than 14 days.'), False),
+        ('include_start_date', 'bool', _('Include start date'
+                                         '\nStandard Zim notation, ex: ">2021-01-01" means you want'
+                                         ' the task to appear not sooner than in January.'), False),
         ('page', 'page', _('Page to be updated (empty = homepage)'), ""),
         ('tasklist', 'string', _('Task list name on server (empty = default)'), ""),
-        ('include_start_date', 'bool', _('Include start date'), False)
+        ('postponing_days', 'int', _('Submitting a task: how many day buttons'), 9, (0, 40)),
+        ('button_monday', 'bool', _('Monday button'), True),
+        ('button_next_monday', 'bool', _('Next Monday button (in two weeks)'), True),
+        ('button_next_month', 'bool', _('Next month button'), True),
+        ('button_next_year', 'bool', _('Next year button (1st Feb)'), True),
     )
 
     def __init__(self):
@@ -312,7 +322,7 @@ class GoogletasksWindow(MainWindowExtension):
             self.sync_status()
         self.controller.fetch(force=True)
 
-    @action(_('_Import all non-completed even already imported tasks'))  # T: menu item
+    @action(_('_Import all non-completed even already imported tasks from the past'))  # T: menu item
     def import_history(self):
         if self.controller.preferences["auto_sync"]:
             self.sync_status()
@@ -370,15 +380,42 @@ class GoogletasksNewTaskDialog(Dialog):
         # we cant tab out from notes textarea field, hence its placed under date
         self.vbox.pack_start(self.input_notes, expand=False, fill=True, padding=0)
 
-        # 9 postponing buttons
+        # arbitrary postponing buttons
         hbox = Gtk.HBox()
-        self.vbox.add(hbox)
-        hbox.pack_start(Gtk.Label(label='Days: '), expand=False, fill=True, padding=0)
-        for i in range(1, 10):
-            button = Gtk.Button.new_with_mnemonic(
-                label="_{} {}".format(i, self.controller.get_time(add_days=i, mode="day")))
-            button.connect("clicked", self.postpone, i)
-            hbox.pack_start(button, expand=False, fill=True, padding=0)
+
+        def butt(label=None, date=None, days=None):
+            """ Call either with label and date are with days."""
+            if days:
+                label = f"{'_' if days < 10 else ''}{days} {self.controller.get_time(add_days=days, mode='day')}"
+                date = self.controller.get_time(add_days=days, mode="date-only")
+            b = Gtk.Button.new_with_mnemonic(label=label)
+            b.connect("clicked", self.postpone(date))
+            b.set_tooltip_text(date)
+            hbox.pack_start(b, expand=False, fill=True, padding=0)
+
+        if self.controller.preferences["button_monday"]:
+            butt("_Monday", self._slippy_date(next_monday=True))
+        if self.controller.preferences["button_next_monday"]:
+            butt("_Next Monday", self._slippy_date(next_monday=True, relative_delta={"days": 7}))
+        if self.controller.preferences["button_next_month"]:
+            butt("Mon_th", self._slippy_date(relative_delta={"months": 1, "day": 1}))
+        if self.controller.preferences["button_next_year"]:
+            butt("_Year", self._slippy_date(relative_delta={"years": 1, "month": 2, "day": 1}))
+
+        if hbox.get_children():  # there were some buttons to display
+            self.vbox.add(hbox)
+
+        # 9 (or more) postponing buttons
+        days = self.controller.preferences["postponing_days"]
+        if days:
+            hbox = Gtk.HBox()
+            self.vbox.add(hbox)
+            hbox.pack_start(Gtk.Label(label='Days: '), expand=False, fill=True, padding=0)
+            for i in range(1, days + 1):
+                butt(days=i)
+                if not i % 9:  # put every 9 buttons to another line, do not expand the row to infinity
+                    hbox = Gtk.HBox()
+                    self.vbox.add(hbox)
 
         # predefined fields
         if "title" in self.task:
@@ -391,6 +428,22 @@ class GoogletasksNewTaskDialog(Dialog):
         # display window
         self.show_all()
         return self
+
+    def _slippy_date(self, add_days=0, next_monday=False, relative_delta=None):
+
+        def next_weekday(d, weekday):
+            days_ahead = weekday - d.weekday()
+            if days_ahead <= 0:  # Target day already happened this week
+                days_ahead += 7
+            return d + datetime.timedelta(days_ahead)
+
+        d = self.controller.get_time(add_days=add_days, mode="object")
+
+        if next_monday:
+            d = next_weekday(d, 0)  # 0 = Monday, 1=Tuesday, 2=Wednesday...
+        if relative_delta:
+            d += relativedelta(**relative_delta)
+        return self.controller.get_time(use_date=d, mode="date-only")
 
     def update_date(self, _):
         try:
@@ -438,9 +491,16 @@ class GoogletasksNewTaskDialog(Dialog):
             buffer.insert_parsetree_at_cursor(Parser().parse(text))
         self.destroy()
 
-    def postpone(self, _, number):
-        self.input_due.set_text(self.controller.get_time(add_days=number, mode="date-only"))
-        self.do_response_ok()
+    # def postpone(self, _, number):
+    #     self.input_due.set_text(self.controller.get_time(add_days=number, mode="date-only"))
+    #     self.do_response_ok()
+    def postpone(self, date):
+
+        def _(_):
+            self.input_due.set_text(date)
+            self.do_response_ok()
+
+        return _
 
 
 class GoogletasksController:
