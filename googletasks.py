@@ -91,8 +91,10 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
         ('tasklist', 'string', _('Task list name on server (empty = default)'), ""),
         ('postponing_days', 'int', _('Submitting a task: how many day buttons'), 9, (0, 40)),
         ('button_monday', 'bool', _('Monday button'), True),
-        ('button_next_monday', 'bool', _('Next Monday button (in two weeks)'), True),
-        ('button_next_month', 'bool', _('Next month button'), True),
+        ('button_next_monday', 'bool', _('Next Monday button (Monday in two weeks)'), True),
+        ('button_next_month', 'bool', _('Next month button (1st next month)'), True),
+        ('button_3_months', 'bool', _('Three months button (+3 months)'), True),
+        ('button_6_months', 'bool', _('Half a year button (+6 months)'), True),
         ('button_next_year', 'bool', _('Next year button (1st Feb)'), True),
     )
 
@@ -399,6 +401,10 @@ class GoogletasksNewTaskDialog(Dialog):
             butt("_Next Monday", self._slippy_date(next_monday=True, relative_delta={"days": 7}))
         if self.controller.preferences["button_next_month"]:
             butt("Mon_th", self._slippy_date(relative_delta={"months": 1, "day": 1}))
+        if self.controller.preferences["button_3_months"]:
+            butt("3 month_s", self._slippy_date(relative_delta={"months": 3}))
+        if self.controller.preferences["button_6_months"]:
+            butt("_Half a year", self._slippy_date(relative_delta={"months": 6}))
         if self.controller.preferences["button_next_year"]:
             butt("_Year", self._slippy_date(relative_delta={"years": 1, "month": 2, "day": 1}))
 
