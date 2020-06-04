@@ -181,11 +181,8 @@ def monkeypatch_method(cls):
 
 
 class GoogletasksWindow(MainWindowExtension):
-    gui = ""
 
     def __init__(self, plugin, window):
-        self.label_object = None
-
         controller = self.controller = GoogletasksController(
             window=window,
             preferences=plugin.notebook_properties(window.notebook)
@@ -224,7 +221,7 @@ class GoogletasksWindow(MainWindowExtension):
 
             lists = []
             for title in self.controller.cache.lists:
-                # Apostrophe supressed; I was not able to reliably slash it, getting a strange error:
+                # Apostrophe suppressed; I was not able to reliably slash it, getting a strange error:
                 # gi.repository.GLib.GError: g-markup-error-quark: Error on line 12 char 82:
                 # Odd character “l”, expected a “=” after attribute name “s” of element “menuitem” (2)
                 el = "change_list_{}".format(title.replace(r"'", r""))
@@ -289,64 +286,17 @@ class GoogletasksWindow(MainWindowExtension):
             task = self.controller.read_task_from_selection(buffer)
             self.add_new_task(task=task)
 
-    # noinspection PyArgumentList
     @action(_('_Add new task...'))  # T: menu item
     def add_new_task(self, task=None):
         # gui window
         if task is None:
             task = {}
-        self.gui = GoogletasksNewTaskDialog(self.window, _('Search'), defaultwindowsize=(300, -1))
-        self.gui.set_controller(self.controller)
-        self.gui.resize(300, 100)  # reset size
-        self.gui.task = task
-
-        # title
-        self.label_object = Gtk.Label(label='Update Google task' if task.get("id", "") else 'Create Google tasks')
-        self.label_object.set_size_request(300, -1)
-        self.gui.vbox.pack_start(self.label_object, expand=False, fill=True, padding=0)
-
-        # editable text fields (title and notes)
-        self.gui.input_title = InputEntry(allow_empty=False, placeholder_text="task title")
-        self.gui.vbox.pack_start(self.gui.input_title, expand=False, fill=True, padding=0)
-        self.gui.input_notes = Gtk.TextView()
-
-        # date field
-        self.gui.input_due = InputEntry(allow_empty=False)
-        try:
-            s = self.controller.get_time(mode="date-only", from_string=task["due"], past_dates=False)
-        except (ValueError, KeyError):  # task["due"] is not set or is in past
-            s = self.controller.get_time(add_days=1, mode="date-only")
-        self.gui.input_due.set_text(s)
-        self.gui.input_due.connect('changed', self.update_date)
-        self.gui.label_due = Gtk.Label(self.controller.get_time(add_days=1, mode="day"))
-        hbox = Gtk.HBox(spacing=1)
-        hbox.pack_start(self.gui.input_due, expand=True, fill=True, padding=0)
-        hbox.pack_start(self.gui.label_due, expand=True, fill=True, padding=0)
-        self.gui.vbox.pack_start(hbox, expand=False, fill=True, padding=0)
-
-        # we cant tab out from notes textarea field, hence its placed under date
-        self.gui.vbox.pack_start(self.gui.input_notes, expand=False, fill=True, padding=0)
-
-        # 9 postponing buttons
-        hbox = Gtk.HBox()
-        self.gui.vbox.add(hbox)
-        hbox.pack_start(Gtk.Label(label='Days: '), expand=False, fill=True, padding=0)
-        for i in range(1, 10):
-            button = Gtk.Button.new_with_mnemonic(
-                label="_{} {}".format(i, self.controller.get_time(add_days=i, mode="day")))
-            button.connect("clicked", self.gui.postpone, i)
-            hbox.pack_start(button, expand=False, fill=True, padding=0)
-
-        # predefined fields
-        if "title" in task:
-            self.gui.input_title.set_text(task["title"])
-        if "notes" in task:
-            self.gui.input_notes.get_buffer().set_text(task["notes"])
-        if "due" in task:
-            logger.error("Not yet implemented")  # XX
-
-        # display window
-        self.gui.show_all()
+        GoogletasksNewTaskDialog(self.window,
+                                 _('Search'),
+                                 task=task,
+                                 controller=self.controller,
+                                 defaultwindowsize=(300, -1)) \
+            .setup()
 
     @action(_('_Claim read only access'))  # T: menu item
     def permission_readonly(self):
@@ -376,22 +326,78 @@ class GoogletasksWindow(MainWindowExtension):
     def refresh_task_lists(self):
         self.controller.refresh_task_lists()
 
-    def update_date(self, _):
-        try:
-            day = self.controller.get_time(from_string=self.gui.input_due.get_text(), mode="day", past_dates=False)
-        except ValueError:
-            day = INVALID_DAY
-        self.gui.label_due.set_text(day)
-
 
 class GoogletasksNewTaskDialog(Dialog):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, task=None, controller=None, **kwargs):
         self.input_title = None
         self.input_due = None
         self.input_notes = None
-        self.controller:GoogletasksController = None
+        self.label_object = None
+        self.label_due = None
+        self.task = task
+        self.controller = controller
         super().__init__(*args, **kwargs)
+
+    # noinspection PyArgumentList
+    def setup(self):
+        self.resize(300, 100)  # reset size
+
+        # title
+        self.label_object = Gtk.Label(label='Update Google task' if self.task.get("id", "") else 'Create Google tasks')
+        self.label_object.set_size_request(300, -1)
+        self.vbox.pack_start(self.label_object, expand=False, fill=True, padding=0)
+
+        # editable text fields (title and notes)
+        self.input_title = InputEntry(allow_empty=False, placeholder_text="task title")
+        self.vbox.pack_start(self.input_title, expand=False, fill=True, padding=0)
+        self.input_notes = Gtk.TextView()
+
+        # date field
+        self.input_due = InputEntry(allow_empty=False)
+        try:
+            s = self.controller.get_time(mode="date-only", from_string=self.task["due"], past_dates=False)
+        except (ValueError, KeyError):  # task["due"] is not set or is in past
+            s = self.controller.get_time(add_days=1, mode="date-only")
+        self.input_due.set_text(s)
+        self.input_due.connect('changed', self.update_date)
+        self.label_due = Gtk.Label(self.controller.get_time(add_days=1, mode="day"))
+        hbox = Gtk.HBox(spacing=1)
+        hbox.pack_start(self.input_due, expand=True, fill=True, padding=0)
+        hbox.pack_start(self.label_due, expand=True, fill=True, padding=0)
+        self.vbox.pack_start(hbox, expand=False, fill=True, padding=0)
+
+        # we cant tab out from notes textarea field, hence its placed under date
+        self.vbox.pack_start(self.input_notes, expand=False, fill=True, padding=0)
+
+        # 9 postponing buttons
+        hbox = Gtk.HBox()
+        self.vbox.add(hbox)
+        hbox.pack_start(Gtk.Label(label='Days: '), expand=False, fill=True, padding=0)
+        for i in range(1, 10):
+            button = Gtk.Button.new_with_mnemonic(
+                label="_{} {}".format(i, self.controller.get_time(add_days=i, mode="day")))
+            button.connect("clicked", self.postpone, i)
+            hbox.pack_start(button, expand=False, fill=True, padding=0)
+
+        # predefined fields
+        if "title" in self.task:
+            self.input_title.set_text(self.task["title"])
+        if "notes" in self.task:
+            self.input_notes.get_buffer().set_text(self.task["notes"])
+        if "due" in self.task:
+            logger.error("Not yet implemented")  # XX
+
+        # display window
+        self.show_all()
+        return self
+
+    def update_date(self, _):
+        try:
+            day = self.controller.get_time(from_string=self.input_due.get_text(), mode="day", past_dates=False)
+        except ValueError:
+            day = INVALID_DAY
+        self.label_due.set_text(day)
 
     def _load_task(self):
         # noinspection PyBroadException
@@ -431,9 +437,6 @@ class GoogletasksNewTaskDialog(Dialog):
             buffer = self.controller.window.pageview.textview.get_buffer()
             buffer.insert_parsetree_at_cursor(Parser().parse(text))
         self.destroy()
-
-    def set_controller(self, controller):
-        self.controller = controller
 
     def postpone(self, _, number):
         self.input_due.set_text(self.controller.get_time(add_days=number, mode="date-only"))
@@ -495,7 +498,7 @@ class GoogletasksController:
             self.info(e)
             return False
         except Exception:
-            self.info('Error in communication with Google Tasks: {}'.format(sys.exc_info()[1]))
+            self.info('Error in communication while un/checking: {}'.format(sys.exc_info()[1]))
             return False
         self.info('Marked as {}'.format(task["status"]))
         return True
@@ -521,7 +524,7 @@ class GoogletasksController:
             self.info(e)
             return False
         except Exception:
-            self.info('Error in communication with Google Tasks: {}'.format(sys.exc_info()[1]))
+            self.info('Error in communication while sumitting: {}'.format(sys.exc_info()[1]))
             return False
         return True
 
@@ -534,7 +537,7 @@ class GoogletasksController:
          it is taken from the default 2020-01-01, so ex: '2021-05' will be converted to '2021-05-01'
         """
         dt_now = use_date if use_date else \
-            dateutil.parser.parse(from_string, default=datetime.datetime(2020, 1, 1)) if from_string else\
+            dateutil.parser.parse(from_string, default=datetime.datetime(2020, 1, 1)) if from_string else \
                 datetime.datetime.now()
         if add_days:
             dt_now += datetime.timedelta(add_days, 0)
@@ -602,7 +605,7 @@ class GoogletasksController:
         s += task['title'][4:] if task['title'].startswith("[ ] ") else task['title']
         if include_due and task["due"]:
             d = GoogletasksController.get_time(mode="date-only", from_string=task['due'])
-            s += " _{//>"+d+"//}"
+            s += " _{//>" + d + "//}"
         if task.get("notes", ""):  # insert other lines
             s += "\n" + task['notes']
         return s
@@ -641,7 +644,8 @@ class GoogletasksController:
         if match:
             task = {"id": match.group(2),
                     "title": match.group(3).split("\n", 1)[0],
-                    "completed": match.group(1).startswith("[*]")}
+                    "status": "completed" if match.group(1).startswith("[*]") else "needsAction"
+                    }
         else:
             try:
                 task["title"] = lines[0].strip()
