@@ -110,7 +110,7 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
             # it would contains the first one always because TextBuffer.set_bullet exists only once.
             # However we can use previously set self.notebook.self.plugin_googletasks
             if bullet in [CHECKED_BOX, UNCHECKED_BOX]:
-                controller = self.notebook.plugin_googletasks
+                controller = self.notebook.plugin_googletasks  # :type: GoogletasksController
                 task_id = controller.get_task_id(line, buffer=self)
                 if task_id:
                     controller.task_checked(task_id, bullet)
@@ -136,7 +136,7 @@ class GoogleCalendarApi:
     def __init__(self, controller):
         self.credential_path = None
         self.scope = None
-        self.controller = controller
+        self.controller = controller  # :type: GoogletasksController
 
     @staticmethod
     def service_obtainable(write_access=False):
@@ -145,7 +145,9 @@ class GoogleCalendarApi:
         else:
             return os.path.isfile(GoogleCalendarApi.permission_read_file)
 
-    def get_service(self, write_access=False):
+    def get_service(self, info=None, write_access=False):
+        if info:
+            self.controller.info(info)  # strangely, this info is not seen in the status bar
         if write_access:
             self.credential_path = GoogleCalendarApi.permission_write_file
             self.scope = 'https://www.googleapis.com/auth/tasks'
@@ -548,8 +550,9 @@ class GoogletasksController:
 
     def task_checked(self, task_id, bullet):
         """ un/mark task on Google server """
-        service = self.calendar_api.get_service(write_access=True)
         task = {"status": "completed" if bullet is CHECKED_BOX else "needsAction"}
+        service = self.calendar_api.get_service(write_access=True,
+                                                info=f"Marking task ID {task_id} as {task['status']}")
 
         # noinspection PyBroadException
         try:
@@ -576,7 +579,7 @@ class GoogletasksController:
         if "due" not in task:  # fallback - default is to postpone the task by a day
             task["due"] = self.get_time(add_days=1, mode="morning")
 
-        service = self.calendar_api.get_service(write_access=True)
+        service = self.calendar_api.get_service(write_access=True, info=f"Submitting task {task.get('title')}")
 
         # noinspection PyBroadException
         try:
@@ -634,7 +637,7 @@ class GoogletasksController:
     def _read_task_list(self, due_min, show_completed=False, service=None):
         """ In case of an error or no tasks found, informs user in the status bar and raises LookupError. """
         if not service:
-            service = self.calendar_api.get_service()
+            service = self.calendar_api.get_service(info="Reading task list")
         try:
             results = service.tasks().list(maxResults=99,
                                            tasklist=self.tasklist,
@@ -838,7 +841,7 @@ class GoogletasksController:
     def sync_bullets_from_server(self):
         """ Loops tasks found on the page and un/check them according to the Google server task status."""
 
-        service = self.calendar_api.get_service()
+        service = self.calendar_api.get_service(info="Syncing tasks status")
 
         # build status cache from last 14 days so that we have to fetch one by one as little tasks as possible
         # XX maybe we may check the number of tasks to be fetched one-by-one after that and if it is still big,
@@ -888,7 +891,7 @@ class GoogletasksController:
 
     def refresh_task_lists(self):
         self.cache.load()
-        service = self.calendar_api.get_service()
+        service = self.calendar_api.get_service(info="Refreshing task lists")
         try:
             results = service.tasklists().list().execute()
         except httplib2.ServerNotFoundError:
