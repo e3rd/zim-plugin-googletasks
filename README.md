@@ -12,8 +12,9 @@ Same as for the other plugins, but needs some Google Tasks API dependencies. Pyt
     * Sync current tasks status before import automatically? (May take a long time.)
     * Page to be updated (empty = homepage)
     * Task list name on server (empty = default task list)
-* Go to Tools / Google Tasks / Import new tasks
-* When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched.
+    * Include start date – if true, when imported, tasks receive little **[start date](https://www.zim-wiki.org/manual/Plugins/Task_List.html)** string, ex: ">2020-01-01", and when you create a task from cursor or selection, this start time is pre-filled 
+* Go to `Tools / Google Tasks / Import new tasks` which imports current tasks that have not been yet imported before
+    * When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched. If you need to import all hisotyr XXX
 * Enjoy
 
 ### Optional

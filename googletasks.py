@@ -55,6 +55,7 @@ CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 APPLICATION_NAME = 'googletasks2zim'
 TASK_ANCHOR_SYMBOL = u"\u270b"
 taskAnchorTreeRe = re.compile(r'(\[.\]\s)?\[\[gtasks://([^|]*)\|' + TASK_ANCHOR_SYMBOL + r'\]\]\s?(.*)')
+start_date_in_title = re.compile(r'(.*)>(\d{4}-\d{2}(-\d{2})?)(.*)')  # (_\{//)?  (//})?
 INVALID_DAY = "N/A"
 
 
@@ -69,7 +70,8 @@ it appends today's tasks; next, it'll append new tasks added since last synchron
 It preserves most of Zim formatting (notably links).
 You may create new task from inside Zim - just select some text, choose menu item Task from selection and set the date
  it should be restored in Zim from Google server.
-See https://github.com/e3rd/zim-plugin-googletasks for more info.
+See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for actions
+ and https://github.com/e3rd/zim-plugin-googletasks for more info.
 (V1.1)
 '''),
         'author': "Edvard Rejthar",
@@ -79,8 +81,9 @@ See https://github.com/e3rd/zim-plugin-googletasks for more info.
         # T: label for plugin preferences dialog
         ('startup_check', 'bool', _('Import new tasks on Zim startup'), True),
         ('auto_sync', 'bool', _('Sync tasks status before import'), False),
-        ('page', 'string', _('Page to be updated (empty = homepage)'), ""),
+        ('page', 'page', _('Page to be updated (empty = homepage)'), ""),
         ('tasklist', 'string', _('Task list name on server (empty = default)'), ""),
+        ('include_start_date', 'bool', _('Include start date'), False)
     )
 
     def __init__(self):
@@ -236,8 +239,9 @@ class GoogletasksWindow(MainWindowExtension):
                                 <menu action='googletasks_menu'>
                                     <menuitem action='import_tasks'/>
                                     <menuitem action='sync_status'/>
-                                    <menuitem action='add_new_task'/>
                                     <menuitem action='send_as_task'/>
+                                    <menuitem action='add_new_task'/>
+                                    <menuitem action='import_history'/>                                    
                                     ''' + "\n".join(permissions) + '''
                                     <menu action='choose_task_list'>                            
                                         ''' + "\n".join(lists) + '''
@@ -282,7 +286,7 @@ class GoogletasksWindow(MainWindowExtension):
             buffer.select_range(start_iter, end_iter)
 
         if buffer.get_selection_bounds():  # a task is selected
-            task = self.controller.read_task_from_selection()
+            task = self.controller.read_task_from_selection(buffer)
             self.add_new_task(task=task)
 
     # noinspection PyArgumentList
@@ -308,7 +312,11 @@ class GoogletasksWindow(MainWindowExtension):
 
         # date field
         self.gui.input_due = InputEntry(allow_empty=False)
-        self.gui.input_due.set_text(self.controller.get_time(add_days=1, mode="date-only"))
+        try:
+            s = self.controller.get_time(mode="date-only", from_string=task["due"], past_dates=False)
+        except (ValueError, KeyError):  # task["due"] is not set or is in past
+            s = self.controller.get_time(add_days=1, mode="date-only")
+        self.gui.input_due.set_text(s)
         self.gui.input_due.connect('changed', self.update_date)
         self.gui.label_due = Gtk.Label(self.controller.get_time(add_days=1, mode="day"))
         hbox = Gtk.HBox(spacing=1)
@@ -354,6 +362,12 @@ class GoogletasksWindow(MainWindowExtension):
             self.sync_status()
         self.controller.fetch(force=True)
 
+    @action(_('_Import all non-completed even already imported tasks'))  # T: menu item
+    def import_history(self):
+        if self.controller.preferences["auto_sync"]:
+            self.sync_status()
+        self.controller.fetch(all_history=True)
+
     @action(_('_Sync tasks status from server'))  # T: menu item
     def sync_status(self):
         self.controller.sync_bullets_from_server()
@@ -376,7 +390,7 @@ class GoogletasksNewTaskDialog(Dialog):
         self.input_title = None
         self.input_due = None
         self.input_notes = None
-        self.controller = None
+        self.controller:GoogletasksController = None
         super().__init__(*args, **kwargs)
 
     def _load_task(self):
@@ -412,7 +426,7 @@ class GoogletasksNewTaskDialog(Dialog):
 
     def do_response_cancel(self):
         """ something failed, restore original text in the zim-page """
-        text = self.controller.get_task_text(self.task)
+        text = self.controller.get_task_text(self.task, self.controller.preferences["include_start_date"])
         if text:
             buffer = self.controller.window.pageview.textview.get_buffer()
             buffer.insert_parsetree_at_cursor(Parser().parse(text))
@@ -515,9 +529,13 @@ class GoogletasksController:
     def get_time(add_days=0, mode=None, from_string=None, use_date=None, past_dates=True):
         """ Time formatting function
          mode =  object | date-only | morning | midnight | last-sec | day
+
+         We preferably use `use_date` object, else we parses from `from_string`. If `from_string` has missing info,
+         it is taken from the default 2020-01-01, so ex: '2021-05' will be converted to '2021-05-01'
         """
         dt_now = use_date if use_date else \
-            dateutil.parser.parse(from_string) if from_string else datetime.datetime.now()
+            dateutil.parser.parse(from_string, default=datetime.datetime(2020, 1, 1)) if from_string else\
+                datetime.datetime.now()
         if add_days:
             dt_now += datetime.timedelta(add_days, 0)
         if not past_dates and dt_now.isoformat()[:10] < datetime.datetime.now().isoformat()[:10]:
@@ -544,28 +562,6 @@ class GoogletasksController:
         if self.window:
             self.window.statusbar.push(0, text)
 
-    def _get_new_items(self, due_min):
-        """ Download new tasks from google server.
-            In case of an error or no tasks found, informs user in the status bar and raises LookupError.
-        """
-        items = self._read_task_list(due_min)
-
-        tasks = []
-        items_ids = set()
-        for item in items:
-            if item["etag"] in self.cache.items_ids:
-                if self.get_time(from_string=item["due"], mode="object").date() \
-                        >= self.get_time(mode="object").date():
-                    items_ids.add(item["etag"])
-                logger.debug('Text already imported {}.'.format(item['title']))
-                continue
-            items_ids.add(item["etag"])
-            logger.info("Appending {}.".format(item["title"]))
-            logger.debug(item)
-            tasks.append(self.get_task_text(item))
-        self.cache.items_ids = items_ids
-        return tasks
-
     def _read_task_list(self, due_min, show_completed=False, service=None):
         """ In case of an error or no tasks found, informs user in the status bar and raises LookupError. """
         if not service:
@@ -588,8 +584,14 @@ class GoogletasksController:
         return items
 
     @staticmethod
-    def get_task_text(task):
-        """ formats task object to zim markup """
+    def get_task_text(task, include_due=False):
+        """ formats task object to zim markup
+        :type task: dict, ex: {'id': '...', 'etag': '"..."', 'title': '...',
+                               'updated': '2019-07-25T10:11:12.000Z',
+                               'status': 'needsAction', 'due': '2018-12-14T00:00:00.000Z'
+                               }
+        :param include_due: If True, small start date string is included.
+        """
         s = "[*] " if task.get("completed") else "[ ] "
         if task.get("id", ""):
             s += "[[gtasks://{}|{}]] ".format(task["id"], TASK_ANCHOR_SYMBOL)
@@ -598,7 +600,10 @@ class GoogletasksController:
             return False
         # we dont want to have the task started with: "[ ] [ ] "
         s += task['title'][4:] if task['title'].startswith("[ ] ") else task['title']
-        if task.get("notes", ""):
+        if include_due and task["due"]:
+            d = GoogletasksController.get_time(mode="date-only", from_string=task['due'])
+            s += " _{//>"+d+"//}"
+        if task.get("notes", ""):  # insert other lines
             s += "\n" + task['notes']
         return s
 
@@ -626,8 +631,9 @@ class GoogletasksController:
                 pass
         return None
 
-    def read_task_from_selection(self):
-        buffer = self.window.pageview.textview.get_buffer()
+    def read_task_from_selection(self, buffer=None):
+        if not buffer:
+            buffer = self.window.pageview.textview.get_buffer()
         task = {}
 
         lines = get_dumper("wiki").dump(buffer.get_parsetree(buffer.get_selection_bounds()))
@@ -641,23 +647,35 @@ class GoogletasksController:
                 task["title"] = lines[0].strip()
             except IndexError:
                 task["title"] = ""
+        if self.preferences["include_start_date"]:
+            m = start_date_in_title.match(task["title"])
+            if m:
+                # ex: 'test 13 _{//>2020-06-03//}' (start date in 'small' markup)
+                task["due"] = m[2]  # → "2020-06-03"
+                task["title"] = (m[1] + m[4]).replace("_{////}", "").rstrip()  # → "test 13"
         task["notes"] = "".join(lines[1:])
 
         buffer.delete(*buffer.get_selection_bounds())  # cuts the task
         return task
 
-    def fetch(self, force=False):
+    def fetch(self, force=False, all_history=False):
         """ Get the new tasks and insert them into page
         :type force: Cancels the action if False and cache file have been accessed recently.
+        :type all_history: If True, imports all non-completed tasks. `force` is implied
+                Note: When importing `all_history`, I have spotted a task that should appear at 7 December 2020
+                 (as confirmed at the Google Calendar web page), however this is what we got from the server:
+                 {'updated': '2019-07-25T10:11:12.000Z', 'status': 'needsAction', 'due': '2017-12-22T00:00:00.000Z'}
+                 I have to admit that this task has been postponed few times.
+                 But we cannot rely on fetching past-tasks only feature, its December date is seen nowhere.
 
-        XX Add menu item "Import all, even once imported from the past" ?
         XX Add plugin option "import even completed tasks" ?
         """
+        if all_history:
+            force = True
 
-        # Load the list of recently seen tasks
+        # Set the date since that we fetch the tasks
         cache_exists = self.cache.exists()
-
-        if cache_exists:
+        if cache_exists:  # recently seen tasks since last import
             if not force:
                 max_hours = 3
                 now = time()
@@ -667,28 +685,44 @@ class GoogletasksController:
                     # if checked in last hours and there wasn't midnight (new tasks time) since then
                     return
             self.cache.load()
-            # with open(CACHE_FILE, "rb") as f:
-            #     self.recent_item_ids = pickle.load(f)
             due_min = self.get_time(use_date=datetime.datetime.fromtimestamp(self.cache.last_time()),
                                     mode="midnight")
-        else:
-            # Xself.recent_item_ids = set()
+        else:  # load today's task (first run)
             due_min = self.get_time(mode="midnight")
+
+        if all_history:  # all non-completed tasks
+            self.cache.items_ids.clear()  # re-import everything
+            due_min = None
 
         # Do internal fetching of new tasks text
         try:
-            tasks = self._get_new_items(due_min)
+            items = self._read_task_list(due_min)
         except LookupError:
             return
+        texts = []
+        items_ids = set()
+        for item in items:
+            if item["etag"] in self.cache.items_ids:
+                if self.get_time(from_string=item["due"], mode="object").date() \
+                        >= self.get_time(mode="object").date():
+                    items_ids.add(item["etag"])
+                logger.debug('Text already imported {}.'.format(item['title']))
+                continue
+            items_ids.add(item["etag"])
+            logger.info("Appending {}.".format(item["title"]))
+            logger.debug(item)
+            texts.append(self.get_task_text(item, self.preferences["include_start_date"]))
+        self.cache.items_ids = items_ids
+
         # Refreshes page from current configuration
         page = self._get_page()
         s = " from list " + self.preferences['tasklist'] if self.preferences['tasklist'] else ""
-        self.info(f"New tasks{s}: {len(tasks)}, page: {page.get_title()}")
-        if not tasks:
+        self.info(f"New tasks{s}: {len(texts)}, page: {page.get_title()}")
+        if not texts:
             if cache_exists:
                 self.cache.touch()
             return
-        text = "\n".join(tasks) + "\n"
+        text = "\n".join(texts) + "\n"
 
         # Insert tasks string into page
         appended = False
@@ -737,6 +771,8 @@ class GoogletasksController:
         service = self.calendar_api.get_service()
 
         # build status cache from last 14 days so that we have to fetch one by one as little tasks as possible
+        # XX maybe we may check the number of tasks to be fetched one-by-one after that and if it is still big,
+        # perform more batch operation like this if there is a performance issue
         try:
             cache = {task["id"]: task["status"] == "completed" for task in
                      self._read_task_list(self.get_time(add_days=-14, mode="midnight"),
