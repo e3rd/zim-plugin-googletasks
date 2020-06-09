@@ -1,0 +1,3 @@
+google-api-python-client
+oauth2client==3.0.0
+jsonpickle
