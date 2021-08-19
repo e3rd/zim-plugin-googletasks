@@ -713,7 +713,7 @@ class GoogletasksController:
         if match:
             task = {"id": match.group(2),
                     "title": match.group(3).split("\n", 1)[0],
-                    "status": "completed" if match.group(1).startswith("[*]") else "needsAction"
+                    "status": "completed" if (match.group(1) or "").startswith("[*]") else "needsAction"
                     }
         else:
             try:
@@ -749,6 +749,7 @@ class GoogletasksController:
         # Set the date since that we fetch the tasks
         cache_exists = self.cache.exists()
         if cache_exists:  # recently seen tasks since last import
+            self.cache.load()
             if not force:
                 max_hours = 3
                 now = time()
@@ -757,7 +758,6 @@ class GoogletasksController:
                         datetime.datetime.now().day is datetime.datetime.fromtimestamp(last_time).day:
                     # if checked in last hours and there wasn't midnight (new tasks time) since then
                     return
-            self.cache.load()
             due_min = self.get_time(use_date=datetime.datetime.fromtimestamp(self.cache.last_time()),
                                     mode="midnight")
         else:  # load today's task (first run)
@@ -772,6 +772,7 @@ class GoogletasksController:
             items = self._read_task_list(due_min)
         except LookupError:
             return
+
         texts = []
         items_ids = set()
         for item in items:
@@ -793,7 +794,7 @@ class GoogletasksController:
         self.info(f"New tasks{s}: {len(texts)}, page: {page.get_title()}")
         if not texts:
             if cache_exists:
-                self.cache.touch()
+                self.cache.touch_save()
             return
         text = "\n".join(texts) + "\n"
 
@@ -811,7 +812,7 @@ class GoogletasksController:
         self._store_to_page(contents, page)
 
         # Save the list of successfully imported task
-        self.cache.save()
+        self.cache.touch_save()
         # with open(CACHE_FILE, "wb") as f:
         #     pickle.dump(self.item_ids, f)
 
@@ -922,6 +923,7 @@ class Cache:
         self._loaded = False
         self.items_ids = set()  # If user changes to another taks list, imports and changes back, items_ids are lost.
         self.lists = {}  # type: title: id
+        self.last_fetched = 0  # get initial datetime
 
     def load(self):
         if not self._loaded and self.exists():
@@ -935,11 +937,12 @@ class Cache:
     def exists(self):
         return os.path.isfile(self._path)
 
-    def touch(self):
-        return os.utime(self._path, None)  # we touch the file
+    def touch_save(self):
+        self.last_fetched = datetime.datetime.now().timestamp()
+        self.save()
 
     def last_time(self):
-        return os.path.getmtime(self._path)
+        return self.last_fetched
 
 
 # initial check
