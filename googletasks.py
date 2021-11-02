@@ -631,8 +631,10 @@ class GoogletasksController:
         """ Echo to the console and status bar. """
         text = "[Googletasks] " + str(text)
         logger.info(text)
-        if self.window:
-            self.window.statusbar.push(0, text)
+        # As of Zim 0.74 (3.12.2020), the status bar has been removed with no substitute,
+        # we do not output the text now.
+        # if self.window:
+        #     self.window.statusbar.push(0, text)
 
     def _read_task_list(self, due_min, show_completed=False, service=None):
         """ In case of an error or no tasks found, informs user in the status bar and raises LookupError. """
