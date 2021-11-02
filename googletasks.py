@@ -20,7 +20,7 @@ from gi.repository import Gtk
 from googleapiclient.errors import Error
 from oauth2client import client, tools
 from oauth2client.file import Storage
-from zim.actions import action, get_gtk_actiongroup, ActionMethod
+from zim.actions import action, get_gtk_actiongroup, ActionClassMethod
 from zim.config import XDG_DATA_HOME, ConfigManager
 from zim.formats import get_dumper
 from zim.formats.wiki import Parser
@@ -196,6 +196,18 @@ def monkeypatch_method(cls):
 
 class GoogletasksWindow(MainWindowExtension):
 
+    @action(_('_Test halo'), menuhints='tools:test')  # T: menu item
+    def instant_search_fd(self):
+        print("test")
+
+    @action(_('_Test halo2'), menuhints='edit')  # T: menu item
+    def instant_search_fd_3(self):
+        print("test")
+
+    @action(_('_Test halo3'), menuhints='notebook:edit')  # T: menu item
+    def instant_search_fd_4(self):
+        print("test")
+
     def __init__(self, plugin, window):
         controller = self.controller = GoogletasksController(
             window=window,
@@ -215,7 +227,7 @@ class GoogletasksWindow(MainWindowExtension):
 
         def get_actions(obj):
             import inspect
-            return inspect.getmembers(obj.__class__, lambda m: isinstance(m, ActionMethod))
+            return inspect.getmembers(obj.__class__, lambda m: isinstance(m, ActionClassMethod))
 
         actions = get_actions(self)
         if actions:
@@ -631,8 +643,10 @@ class GoogletasksController:
         """ Echo to the console and status bar. """
         text = "[Googletasks] " + str(text)
         logger.info(text)
-        if self.window:
-            self.window.statusbar.push(0, text)
+        # As of Zim 0.74 (3.12.2020), the status bar has been removed with no substitute,
+        # we do not output the text now.
+        # if self.window:
+        #     self.window.statusbar.push(0, text)
 
     def _read_task_list(self, due_min, show_completed=False, service=None):
         """ In case of an error or no tasks found, informs user in the status bar and raises LookupError. """
@@ -823,7 +837,7 @@ class GoogletasksController:
         :param page: ZimPage
         """
         bounds = buffer = None
-        if self.window and self.window.pageview.get_page().name is page.name:
+        if self.window and self.window.pageview.page.name is page.name:
             # HP is current page - we use GTK buffers, caret stays at position
             buffer = self.window.pageview.textview.get_buffer()
             bounds = [x.get_offset() for x in buffer.get_selection_bounds()]

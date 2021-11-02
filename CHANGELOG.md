@@ -1,4 +1,4 @@
-# 1.1 (unreleased)
+# 1.1 (2021-11-02) 0.74 compatible
 * CHANGED:
     * Plugin options become Notebook properties.
 * multiple windows of Zim supported
