@@ -51,7 +51,7 @@ from zim.gui.mainwindow import MainWindowExtension
 
 logger = logging.getLogger('zim.plugins.googletasks')
 CACHE_FILE = "googletasks.cache"
-WORKDIR = str(XDG_DATA_HOME.subdir(('zim', 'plugins')))
+WORKDIR = str(XDG_DATA_HOME.folder(('zim', 'plugins')))
 CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 APPLICATION_NAME = 'googletasks2zim'
 TASK_ANCHOR_SYMBOL = u"\u270b"
