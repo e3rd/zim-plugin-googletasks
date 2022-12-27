@@ -14,9 +14,9 @@ from time import time
 import dateutil.parser
 import httplib2
 import jsonpickle
-from apiclient import discovery
 from dateutil.relativedelta import relativedelta
 from gi.repository import Gtk
+from googleapiclient import discovery
 from googleapiclient.errors import Error
 from oauth2client import client, tools
 from oauth2client.file import Storage
