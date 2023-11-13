@@ -10,6 +10,7 @@ import re
 import sys
 from pathlib import Path
 from time import time
+from typing import TYPE_CHECKING
 
 import dateutil.parser
 import httplib2
@@ -31,14 +32,13 @@ try:
     from zim.gui.pageview import TextBuffer
     from zim.gui.mainwindow import MainWindow
 except RuntimeError:
-    """ When invoking the plugin from commandline, I'm was getting this on Ubuntu 17.10.
+    """ When invoking the plugin from commandline, I was getting this on Ubuntu 17.10.
     Defining blank Dialog class helps me to mitigate this strange issue.
-    
+
      File "/usr/lib/python2.7/dist-packages/zim/gui/clipboard.py", line 477, in __init__
         self.clipboard = Gtk.Clipboard(selection=atom)
      RuntimeError: could not create GtkClipboard object
      """
-
 
     class Dialog:
         pass
@@ -48,6 +48,9 @@ from zim.main.command import GtkCommand
 from zim.notebook import build_notebook, Path as ZimPath
 from zim.plugins import PluginClass
 from zim.gui.mainwindow import MainWindowExtension
+
+if TYPE_CHECKING:
+    _ = str
 
 logger = logging.getLogger('zim.plugins.googletasks')
 CACHE_FILE = "googletasks.cache"
@@ -64,7 +67,7 @@ class GoogletasksPlugin(PluginClass):
     plugin_info = {
         'name': _('Google Tasks'),
         'description': _('''\
-Connects to your default Google Tasks lists. Append today's tasks to your Home file. At first run, 
+Connects to your default Google Tasks lists. Append today's tasks to your Home file. At first run,
 it appends today's tasks; next, it'll append new tasks added since last synchronisation every Zim startup
  (and every day, when set in anacron). Every task should be imported only once, unless changed on the server.
 
@@ -110,10 +113,10 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
             # it would contains the first one always because TextBuffer.set_bullet exists only once.
             # However we can use previously set self.notebook.self.plugin_googletasks
             if bullet in [CHECKED_BOX, UNCHECKED_BOX]:
-                controller = self.notebook.plugin_googletasks  # :type: GoogletasksController
+                controller: GoogletasksController = self.notebook.plugin_googletasks
                 task_id = controller.get_task_id(line, buffer=self)
-                if task_id:
-                    controller.task_checked(task_id, bullet)
+                if task_id and not controller.task_checked(task_id, bullet):
+                    return
             self.set_bullet_original(line, bullet, indent=indent)
 
 
@@ -121,12 +124,11 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
     """Class to handle "zim --plugin googletasks" """
     arguments = ('[NOTEBOOK]',)
 
-    preferences = ConfigManager().get_config_dict('preferences.conf')['GoogletasksPlugin'].dump()
-
     def run(self):
         ntb_name = self.get_notebook_argument()[0] or self.get_default_or_only_notebook()
         ntb, _ = build_notebook(ntb_name)
-        GoogletasksController(notebook=ntb, preferences=GoogletasksCommand.preferences).fetch()  # add new lines
+        preferences = ConfigManager().get_config_dict('preferences.conf')['GoogletasksPlugin'].dump()
+        GoogletasksController(notebook=ntb, preferences=preferences).fetch(True)  # add new lines
 
 
 class GoogleCalendarApi:
@@ -136,7 +138,7 @@ class GoogleCalendarApi:
     def __init__(self, controller):
         self.credential_path = None
         self.scope = None
-        self.controller = controller  # :type: GoogletasksController
+        self.controller: GoogletasksController = controller
 
     @staticmethod
     def service_obtainable(write_access=False):
@@ -264,13 +266,13 @@ class GoogletasksWindow(MainWindowExtension):
                                     <menuitem action='sync_status'/>
                                     <menuitem action='send_as_task'/>
                                     <menuitem action='add_new_task'/>
-                                    <menuitem action='import_history'/>                                    
+                                    <menuitem action='import_history'/>
                                     ''' + "\n".join(permissions) + '''
-                                    <menu action='choose_task_list'>                            
+                                    <menu action='choose_task_list'>
                                         ''' + "\n".join(lists) + '''
                                         <separator/>
                                         <menuitem action='refresh_task_lists'/>
-                                    </menu>                                    
+                                    </menu>
                                 </menu>
                             </menu>
                     </menubar>
@@ -355,7 +357,7 @@ class GoogletasksWindow(MainWindowExtension):
 
 class GoogletasksNewTaskDialog(Dialog):
 
-    def __init__(self, *args, task=None, controller=None, **kwargs):
+    def __init__(self, *args, task=None, controller: "GoogletasksController" = None, **kwargs):
         self.input_title = None
         self.input_due = None
         self.input_notes = None
@@ -524,10 +526,9 @@ class GoogletasksNewTaskDialog(Dialog):
 
 
 class GoogletasksController:
-    window = None  # type: MainWindow
 
-    def __init__(self, window=None, notebook=None, preferences=None):
-        GoogletasksController.window = self.window = window
+    def __init__(self, window: MainWindow | None = None, notebook=None, preferences=None):
+        self.window = window
         self.notebook = notebook
         self.preferences = preferences
 
@@ -544,8 +545,9 @@ class GoogletasksController:
         If task list ID cannot be fetched, raise LookupError."""
         # we have to pass ID or @default as task list
         list_title = self.preferences["tasklist"]
-        if not list_title:
-            # it is more user friendly to let the parameter empty for the default task list
+        if not list_title or list_title == "@default":
+            # It is more user friendly to let the parameter empty for the default task list.
+            # Plus, the string '@default' is never in the cache.
             return "@default"
         if list_title not in self.cache.lists:
             self.refresh_task_lists()
@@ -566,22 +568,21 @@ class GoogletasksController:
         service = self.calendar_api.get_service(write_access=True,
                                                 info=f"Marking task ID {task_id} as {task['status']}")
 
-        # noinspection PyBroadException
         try:
             if bullet is CHECKED_BOX:  # small patch will be sufficient
                 service.tasks().patch(tasklist=self.tasklist, task=task_id, body=task).execute()
             else:  # we need to delete the automatically generated completed field, need to do a whole update
                 task = service.tasks().get(tasklist=self.tasklist, task=task_id).execute()
-                del task["completed"]
+                task.pop("completed", None)
                 task["status"] = "needsAction"
                 service.tasks().update(tasklist=self.tasklist, task=task_id, body=task).execute()
         except LookupError as e:
             self.info(e)
             return False
-        except Exception:
-            self.info('Error in communication while un/checking: {}'.format(sys.exc_info()[1]))
+        except Exception as e:
+            self.info(f'Error in communication while un/checking: {e}')
             return False
-        self.info('Marked as {}'.format(task["status"]))
+        self.info(f'Marked as {task["status"]}')
         return True
 
     def submit_task(self, task=None):
@@ -604,8 +605,8 @@ class GoogletasksController:
         except LookupError as e:
             self.info(e)
             return False
-        except Exception:
-            self.info('Error in communication while sumitting: {}'.format(sys.exc_info()[1]))
+        except Exception as e:
+            self.info(f'Error in communication while sumitting: {e}')
             return False
         return True
 
@@ -619,7 +620,7 @@ class GoogletasksController:
         """
         dt_now = use_date if use_date else \
             dateutil.parser.parse(from_string, default=datetime.datetime(2020, 1, 1)) if from_string else \
-                datetime.datetime.now()
+            datetime.datetime.now()
         if add_days:
             dt_now += datetime.timedelta(add_days, 0)
         if not past_dates and dt_now.isoformat()[:10] < datetime.datetime.now().isoformat()[:10]:
@@ -928,16 +929,15 @@ class GoogletasksController:
 
 class Cache:
 
-    def __init__(self, path):
-        """
-
-        :type path: Path
-        """
+    def __init__(self, path: Path):
         self._path = path
         self._loaded = False
-        self.items_ids = set()  # If user changes to another taks list, imports and changes back, items_ids are lost.
-        self.lists = {}  # type: title: id
-        self.last_fetched = 0  # get initial datetime
+        self.items_ids = set()
+        "If user changes to another taks list, imports and changes back, items_ids are lost."
+        self.lists = {}
+        "{title: id}"
+        self.last_fetched = 0
+        "get initial datetime"
 
     def load(self):
         if not self._loaded and self.exists():

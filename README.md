@@ -1,5 +1,5 @@
 # Google tasks plugin for Zim Wiki
-Connects to your default Google Tasks lists. Append today's tasks to your Home file. Every task should be imported only once. If you change the tasks, you can upload it back to Google server. If you complete it, the completion should propagate back as well.
+Connects [Zim Wiki](https://zim-wiki.org/) to your default Google Tasks lists. Append today's tasks to your Home file. Every task should be imported only once. If you change the tasks, you can upload it back to Google server. If you complete it, the completion should propagate back as well.
 
 ## Installation
 Same as for the other plugins, but needs some Google Tasks API dependencies. Python3.6+ required.
@@ -14,7 +14,7 @@ Same as for the other plugins, but needs some Google Tasks API dependencies. Pyt
     * Task list name on server (empty = default task list)
     * Include start date – if true, when imported, tasks receive little **[start date](https://www.zim-wiki.org/manual/Plugins/Task_List.html)** string, ex: ">2021-01-01", and when you create a task from cursor or selection, this start time is pre-filled 
 * Go to `Tools / Google Tasks / Import new tasks` which imports current tasks that have not been yet imported before
-    * When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched. If you need to import all hisotyr XXX
+    * When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched. If you need to import all history, just go to the option in `Tools / Google Tasks`.
 * Enjoy
 
 ### Optional
@@ -26,7 +26,7 @@ echo "1   5   googletasks2zim sudo su YOUR-USERNAME bash -c 'export DISPLAY=:0 &
 ## How the propagation works?
  * When importing, the task will preserve it's Google-ID in a small link.
  * If you complete the checkbox of zim-task, the plugin searches for this link and marks the task completed on server.
- * If you synchronizes tasks status from server, every task on the task page will become un/checked according to the server status.
+ * If you synchronize tasks status from server, every task on the task page will become un/checked according to the server status.
 
 ### Multiple Zim instances
 Every Zim notebook can use independent task list. If they use the same list, any task will be imported into both.
