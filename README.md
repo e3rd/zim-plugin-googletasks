@@ -3,7 +3,7 @@ Connects [Zim Wiki](https://zim-wiki.org/) to your default Google Tasks lists. A
 
 ## Installation
 Same as for the other plugins, but needs some Google Tasks API dependencies. Python3.6+ required.
-* Run `pip3 install --user dateutil google-api-python-client oauth2client==3.0.0 jsonpickle` (for current version, for the old Zim 0.68-, try `pip2 ...`)
+* Run `pip install -r requirements.txt --break-system-packages`
 * Put the `googletasks.py` and `googletasks_client_id.json` into the plugins folder
   * something like `%appdata%\zim\data\zim\plugins` in Win, or `~/.local/share/zim/plugins/` in Linux
 * You enable the plugin in `Zim / Edit / Preferences / Plugins` : check mark Google tasks.
@@ -12,7 +12,7 @@ Same as for the other plugins, but needs some Google Tasks API dependencies. Pyt
     * Sync current tasks status before import automatically? (May take a long time.)
     * Page to be updated (empty = homepage)
     * Task list name on server (empty = default task list)
-    * Include start date – if true, when imported, tasks receive little **[start date](https://www.zim-wiki.org/manual/Plugins/Task_List.html)** string, ex: ">2021-01-01", and when you create a task from cursor or selection, this start time is pre-filled 
+    * Include start date – if true, when imported, tasks receive little **[start date](https://www.zim-wiki.org/manual/Plugins/Task_List.html)** string, ex: ">2021-01-01", and when you create a task from cursor or selection, this start time is pre-filled
 * Go to `Tools / Google Tasks / Import new tasks` which imports current tasks that have not been yet imported before
     * When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched. If you need to import all history, just go to the option in `Tools / Google Tasks`.
 * Enjoy
@@ -30,7 +30,7 @@ echo "1   5   googletasks2zim sudo su YOUR-USERNAME bash -c 'export DISPLAY=:0 &
 
 ### Multiple Zim instances
 Every Zim notebook can use independent task list. If they use the same list, any task will be imported into both.
-      
+
 ## One image for hundred words
 ![Demonstration](example.png?raw=true)
 
