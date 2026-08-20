@@ -26,6 +26,8 @@ from zim.config import XDG_DATA_HOME, ConfigManager
 from zim.formats import get_dumper
 from zim.formats.wiki import Parser
 
+from zim.plugins.zim_page_content import insert_after_first_blank_line
+
 try:
     from zim.gui.widgets import Dialog
     from zim.gui.widgets import InputEntry
@@ -46,6 +48,7 @@ from zim.formats import CHECKED_BOX, UNCHECKED_BOX
 from zim.main import NotebookCommand
 from zim.main.command import GtkCommand
 from zim.notebook import build_notebook, Path as ZimPath
+from zim.notebook.page import Page
 from zim.plugins import PluginClass
 from zim.gui.mainwindow import MainWindowExtension
 
@@ -118,6 +121,39 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
                 if task_id and not controller.task_checked(task_id, bullet):
                     return
             self.set_bullet_original(line, bullet, indent=indent)
+
+        # noinspection PyShadowingNames
+        @monkeypatch_method(Page)
+        def reload_textbuffer(self):
+            """ Overriding of notebook/page.py/Page/reload_textbuffer
+
+            The default implementation clears the textbuffer and re-inserts all
+            content at the cursor, which leaves the cursor (and thus the scrolled
+            view) at the very end of the page. That happens on every reload of a
+            currently displayed page - e.g. after an external process appends
+            text to the page file and asks the running Zim to pick it up (see
+            insert_note.py) - and jumps the view to the bottom of the page even
+            though nothing the user was looking at moved that far.
+
+            We restore the cursor to (approximately) where it was before the
+            reload, same reasoning as the set_bullet patch above for finding the
+            right controller/window across multiple notebooks.
+
+            Note: unlike TextBuffer, a Page has no `.notebook` attribute of its
+            own - it's the bound TextBuffer (self._textbuffer) that carries
+            `.notebook` (see TextBuffer.__init__ in zim/gui/pageview), so we
+            look up the controller through that instead.
+            """
+            buffer = self._textbuffer
+            controller: GoogletasksController = buffer.notebook.plugin_googletasks if buffer else None
+            window = controller.window if controller else None
+            pageview = window.pageview if (window and window.page is self) else None
+            cursor_pos = pageview.get_cursor_pos() if pageview else None
+
+            self.reload_textbuffer_original()
+
+            if pageview is not None:
+                pageview.set_cursor_pos(cursor_pos)
 
 
 class GoogletasksCommand(NotebookCommand, GtkCommand):
@@ -814,15 +850,7 @@ class GoogletasksController:
         text = "\n".join(texts) + "\n"
 
         # Insert tasks string into page
-        appended = False
-        contents = []
-        for line in page.dump("wiki"):
-            contents.append(line)
-            if line.strip() == "" and not appended:  # insert after first empty line
-                appended = True
-                contents.append(text)
-        if not appended:  # or insert at the end of the page text
-            contents.append(text)
+        contents = insert_after_first_blank_line(page.dump("wiki"), text)
 
         self._store_to_page(contents, page)
 

@@ -4,7 +4,7 @@ Connects [Zim Wiki](https://zim-wiki.org/) to your default Google Tasks lists. A
 ## Installation
 Same as for the other plugins, but needs some Google Tasks API dependencies. Python3.6+ required.
 * Run `pip install -r requirements.txt --break-system-packages`
-* Put the `googletasks.py` and `googletasks_client_id.json` into the plugins folder
+* Put the `googletasks.py`, `_lib/zim_page_content.py` and `googletasks_client_id.json` into the plugins folder
   * something like `%appdata%\zim\data\zim\plugins` in Win, or `~/.local/share/zim/plugins/` in Linux
 * You enable the plugin in `Zim / Edit / Preferences / Plugins` : check mark Google tasks.
 * Choose your preferences at `Zim / File / Properties / Google Tasks`
@@ -36,3 +36,6 @@ Every Zim notebook can use independent task list. If they use the same list, any
 
 ## Missing feature?
 Feel free to tell me in the issues what you'd like it to do.
+
+## Other tools in this repository
+* `bin/insert_note.py PAGE_FILE TEXT` — inserts an arbitrary line of text into a Zim page from any system script or cron job (not just from Google Tasks), then asks an already-running Zim to pick up the change. See the script's own docstring for how it finds the right notebook/page and avoids duplicating an already-open window.

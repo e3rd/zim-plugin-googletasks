@@ -1,3 +1,8 @@
+# Unreleased
+* fix: view no longer jumps to the end of the page when an external process reloads it
+* fix: silent ImportError was disabling the whole plugin (checkbox sync included)
+* new: `bin/insert_note.py` standalone tool to insert arbitrary text into a Zim page from any script/cron job
+
 # 1.1 (2021-11-02) 0.74 compatible
 * CHANGED:
     * Plugin options become Notebook properties.
