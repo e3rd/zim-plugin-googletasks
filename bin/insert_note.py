@@ -92,7 +92,14 @@ def reload_in_running_zim(notebook_uri: str, page_name: str) -> None:
     # user closes that window. Popen + no wait avoids that, and dropping its
     # stdout/stderr also hides the unrelated SyntaxWarning noise Zim's own
     # (pre-3.12) source triggers on every plugin it loads.
-    subprocess.Popen(["zim", notebook_uri, page_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    #
+    # A missing `zim` binary must not look like a failure of the whole script: by the time we get
+    # here the note is already written to the page. Cron - the main user of this script - runs with
+    # a bare PATH that often misses ~/.local/bin or a snap shim, so warn and keep the exit code 0.
+    try:
+        subprocess.Popen(["zim", notebook_uri, page_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        print(f"Warning: note inserted, but running Zim could not be notified: {e}", file=sys.stderr)
 
 
 def main() -> None:

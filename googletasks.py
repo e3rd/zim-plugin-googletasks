@@ -135,25 +135,31 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
             insert_note.py) - and jumps the view to the bottom of the page even
             though nothing the user was looking at moved that far.
 
-            We restore the cursor to (approximately) where it was before the
-            reload, same reasoning as the set_bullet patch above for finding the
-            right controller/window across multiple notebooks.
+            We restore the cursor to where it was before the reload, same
+            reasoning as the set_bullet patch above for finding the right
+            controller/window across multiple notebooks.
 
             Note: unlike TextBuffer, a Page has no `.notebook` attribute of its
             own - it's the bound TextBuffer (self._textbuffer) that carries
             `.notebook` (see TextBuffer.__init__ in zim/gui/pageview), so we
-            look up the controller through that instead.
+            look up the controller through that instead. This patch sits on the
+            shared Page class and therefore fires for *every* page reload in
+            every notebook, including notebooks this plugin never extended, so
+            each step of that lookup has to tolerate being absent - anything
+            missing simply means "no cursor to preserve", never an exception
+            that would abort the reload itself.
             """
             buffer = self._textbuffer
-            controller: GoogletasksController = buffer.notebook.plugin_googletasks if buffer else None
-            window = controller.window if controller else None
+            notebook = getattr(buffer, "notebook", None) if buffer else None
+            controller: GoogletasksController = getattr(notebook, "plugin_googletasks", None)
+            window = getattr(controller, "window", None)
             pageview = window.pageview if (window and window.page is self) else None
-            cursor_pos = pageview.get_cursor_pos() if pageview else None
+            anchor = get_cursor_anchor(pageview) if pageview else None
 
             self.reload_textbuffer_original()
 
-            if pageview is not None:
-                pageview.set_cursor_pos(cursor_pos)
+            if anchor:
+                restore_cursor_anchor(pageview, anchor)
 
 
 class GoogletasksCommand(NotebookCommand, GtkCommand):
@@ -230,6 +236,43 @@ def monkeypatch_method(cls):
         return func
 
     return decorator
+
+
+def _line_text(buffer, line):
+    """ Plain text of a single line of a Gtk.TextBuffer, without the trailing newline. """
+    start = buffer.get_iter_at_line(line)
+    end = start.copy()
+    if not end.ends_line():
+        end.forward_to_line_end()
+    return buffer.get_text(start, end, True)
+
+
+def get_cursor_anchor(pageview):
+    """ Where the caret is, in a form that survives a reload: (line number, that line's text,
+        column within the line). See restore_cursor_anchor() and the reload_textbuffer patch. """
+    buffer = pageview.textview.get_buffer()
+    it = buffer.get_iter_at_mark(buffer.get_insert())
+    return it.get_line(), _line_text(buffer, it.get_line()), it.get_line_offset()
+
+
+def restore_cursor_anchor(pageview, anchor):
+    """ Put the caret back onto the line it was on, located by that line's text.
+
+    Restoring a plain character (or even line) offset breaks as soon as something was inserted
+    *above* the caret - which is exactly what this plugin and insert_note.py do, they insert
+    after the first blank line near the top of the page - so the caret would land somewhere in
+    or below the freshly inserted block instead of where the user was reading. Therefore we look
+    the line up by its content and, if it occurs several times, take the occurrence closest to
+    the original line number. Blank/vanished lines fall back to the plain line number.
+    """
+    line, text, column = anchor
+    buffer = pageview.textview.get_buffer()
+    last_line = buffer.get_line_count() - 1
+    candidates = [i for i in range(last_line + 1) if _line_text(buffer, i) == text] if text else []
+    target = min(candidates, key=lambda i: abs(i - line)) if candidates else min(line, last_line)
+    it = buffer.get_iter_at_line(target)
+    it.forward_chars(min(column, len(_line_text(buffer, target))))
+    pageview.set_cursor_pos(it.get_offset())
 
 
 class GoogletasksWindow(MainWindowExtension):
@@ -827,13 +870,20 @@ class GoogletasksController:
         texts = []
         items_ids = set()
         for item in items:
-            if item["etag"] in self.cache.items_ids:
-                if self.get_time(from_string=item["due"], mode="object").date() \
-                        >= self.get_time(mode="object").date():
-                    items_ids.add(item["etag"])
+            # We remember the task ID, not the etag. The etag is a version fingerprint that changes
+            # whenever *anything* about the task changes - title, due date, even its position in the
+            # list - so an already imported task that got touched on the server looked brand new and
+            # was imported a second time. (`or item["etag"]` only keeps caches written by older
+            # versions of the plugin working; it may be dropped in some future release.)
+            already_imported = item["id"] in self.cache.items_ids or item["etag"] in self.cache.items_ids
+            # Remember *every* task the server returned, not just those due today or later. `due_min`
+            # above reaches back to the midnight of the previous import, so past-due tasks are handed
+            # to us again on the next run - forgetting them here is what re-imported yesterday's
+            # tasks today. The set stays bounded anyway: it is rebuilt from one response each time.
+            items_ids.add(item["id"])
+            if already_imported:
                 logger.debug('Text already imported {}.'.format(item['title']))
                 continue
-            items_ids.add(item["etag"])
             logger.info("Appending {}.".format(item["title"]))
             logger.debug(item)
             texts.append(self.get_task_text(item, self.preferences["include_start_date"]))
@@ -961,7 +1011,8 @@ class Cache:
         self._path = path
         self._loaded = False
         self.items_ids = set()
-        "If user changes to another taks list, imports and changes back, items_ids are lost."
+        """ IDs of the tasks returned by the last import, so that they are not imported twice.
+            If user changes to another taks list, imports and changes back, items_ids are lost. """
         self.lists = {}
         "{title: id}"
         self.last_fetched = 0

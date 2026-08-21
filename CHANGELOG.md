@@ -1,5 +1,6 @@
 # Unreleased
-* fix: view no longer jumps to the end of the page when an external process reloads it
+* fix: tasks imported yesterday were imported again today (dedup cache keyed on the volatile etag and dropped past-due tasks that the next import still asks the server for)
+* fix: view no longer jumps to the end of the page when an external process reloads it; the caret keeps its line even when text was inserted above it
 * fix: silent ImportError was disabling the whole plugin (checkbox sync included)
 * new: `bin/insert_note.py` standalone tool to insert arbitrary text into a Zim page from any script/cron job
 
