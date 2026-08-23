@@ -3,10 +3,12 @@ Connects [Zim Wiki](https://zim-wiki.org/) to your default Google Tasks lists. A
 
 ## Installation
 Same as for the other plugins, but needs some Google Tasks API dependencies. Python3.6+ required.
-* Run `pip install -r requirements.txt --break-system-packages`
-* Put the `googletasks.py`, `_lib/zim_page_content.py` and `googletasks_client_id.json` into the plugins folder
-  * something like `%appdata%\zim\data\zim\plugins` in Win, or `~/.local/share/zim/plugins/` in Linux
-  * **all three files go directly into that folder** – `zim_page_content.py` must end up next to `googletasks.py`, *not* in a `_lib` subfolder. Zim loads plugins as submodules of `zim.plugins`, so a misplaced helper makes the import fail – and Zim swallows that error, silently disabling the whole plugin (no tasks imported, no checkbox sync, no traceback; look for `No such plugin: googletasks` in the log)
+* Run `python3 install.py` — installs the pip dependencies and copies `googletasks.py`, `_lib/zim_page_content.py` and `googletasks_client_id.json` into Zim's plugins folder for you.
+* Or do it by hand:
+  * Run `pip install -r requirements.txt --break-system-packages`
+  * Put the `googletasks.py`, `_lib/zim_page_content.py` and `googletasks_client_id.json` into the plugins folder
+    * something like `%appdata%\zim\data\zim\plugins` in Win, or `~/.local/share/zim/plugins/` in Linux
+    * **all three files go directly into that folder** – `zim_page_content.py` must end up next to `googletasks.py`, *not* in a `_lib` subfolder. Zim loads plugins as submodules of `zim.plugins`, so a misplaced helper makes the import fail – and Zim swallows that error, silently disabling the whole plugin (no tasks imported, no checkbox sync, no traceback; look for `No such plugin: googletasks` in the log)
 * You enable the plugin in `Zim / Edit / Preferences / Plugins` : check mark Google tasks.
 * Choose your preferences at `Zim / File / Properties / Google Tasks`
     * Import new tasks on Zim startup?
