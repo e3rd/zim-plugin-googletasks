@@ -1,4 +1,5 @@
 # Unreleased
+* fix: tasks imported by the nightly cron run were imported again by the next manual import in an already running Zim (the window read the cache file only once, at startup)
 * fix: tasks imported yesterday were imported again today (dedup cache keyed on the volatile etag and dropped past-due tasks that the next import still asks the server for)
 * fix: view no longer jumps to the end of the page when an external process reloads it; the caret keeps its line even when text was inserted above it
 * fix: silent ImportError was disabling the whole plugin (checkbox sync included)

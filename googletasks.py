@@ -1009,7 +1009,8 @@ class Cache:
 
     def __init__(self, path: Path):
         self._path = path
-        self._loaded = False
+        self._mtime = None
+        "mtime of the cache file as we last read it, so that we notice another process rewriting it"
         self.items_ids = set()
         """ IDs of the tasks returned by the last import, so that they are not imported twice.
             If user changes to another taks list, imports and changes back, items_ids are lost. """
@@ -1019,13 +1020,23 @@ class Cache:
         "get initial datetime"
 
     def load(self):
-        if not self._loaded and self.exists():
+        """ (Re)read the cache file whenever it changed on disk since we last looked.
+
+        We are not the only writer. The Zim GUI keeps a single Cache object alive for the whole
+        life of the window, while `zim --plugin googletasks` (anacron, see README) imports from a
+        separate process with a Cache of its own. Reading the file only once meant the running Zim
+        never learned about the nightly import: the next manual "Import new tasks" still worked
+        from the task IDs it had seen at startup, imported the very same tasks a second time and
+        then overwrote the cron's cache file with its own outdated copy.
+        """
+        if self.exists() and os.path.getmtime(self._path) != self._mtime:
             self.__dict__.update(jsonpickle.decode(self._path.read_text()))
-            self._loaded = True
+            self._mtime = os.path.getmtime(self._path)
         return self
 
     def save(self):
         self._path.write_text(jsonpickle.encode({k: v for k, v in vars(self).items() if not k.startswith('_')}))
+        self._mtime = os.path.getmtime(self._path)
 
     def exists(self):
         return os.path.isfile(self._path)
