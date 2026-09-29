@@ -26,6 +26,17 @@ If you want to synchronise automatically, I recommend using `anacron`. This line
 echo "1   5   googletasks2zim sudo su YOUR-USERNAME bash -c 'export DISPLAY=:0 && zim --plugin googletasks'" | sudo tee -a /etc/anacrontab
 ```
 
+## Zim version compatibility
+The plugin touches Zim internals, so the exact Zim version matters. The one difference in the API used is `XDG_DATA_HOME.subdir(...)` (older Zim) vs. `.folder(...)` (newer Zim), see the `WORKDIR` line in `googletasks.py`.
+
+| Zim version | Plugin version | Notes |
+|---|---|---|
+| 0.68 and older | 1.0 (tag `0.68`) | Last version for the old Zim; current master does not work with it. |
+| 0.74 | 1.1 (tag `1.1`) | Plugin options became Notebook properties. Uses `XDG_DATA_HOME.subdir`. |
+| 0.74.2 (develop) | commit `9a6c741` | Switched to `XDG_DATA_HOME.folder`. |
+| 0.74.3 | commit `5c5e12d` | Switched back to `XDG_DATA_HOME.subdir`. **Current master is not tested with it** – if it fails on `WORKDIR`, change `.folder` to `.subdir`. |
+| 0.75 and newer | current master | Uses `XDG_DATA_HOME.folder`. |
+
 ## How the propagation works?
  * When importing, the task will preserve it's Google-ID in a small link.
  * If you complete the checkbox of zim-task, the plugin searches for this link and marks the task completed on server.
