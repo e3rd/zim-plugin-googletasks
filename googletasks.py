@@ -22,7 +22,7 @@ from googleapiclient.errors import Error
 from oauth2client import client, tools
 from oauth2client.file import Storage
 from zim.actions import action, get_gtk_actiongroup, ActionClassMethod
-from zim.config import XDG_DATA_HOME, ConfigManager
+from zim.config import XDG_CONFIG_HOME, XDG_DATA_HOME, ConfigManager
 from zim.formats import get_dumper
 from zim.formats.wiki import Parser
 
@@ -58,7 +58,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger('zim.plugins.googletasks')
 CACHE_FILE = "googletasks.cache"
 WORKDIR = str(XDG_DATA_HOME.folder(('zim', 'plugins')))
-CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
+BUNDLED_CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
+CLIENT_SECRET_ENV = 'GOOGLETASKS_CLIENT_SECRET_FILE'
+OWN_CLIENT_SECRET_NAME = 'googletasks_client_secret.json'
+
+
+def find_client_secret_file():
+    """ Path to the OAuth client secret. Optional own secret (for those hitting the quota of the bundled one):
+        1. env var GOOGLETASKS_CLIENT_SECRET_FILE (path to the json)
+        2. googletasks_client_secret.json in Zim's config dir (~/.config/zim/ on Linux)
+        3. the bundled googletasks_client_id.json next to the plugin (default)
+    """
+    env = os.environ.get(CLIENT_SECRET_ENV)
+    if env:
+        return env
+    own = os.path.join(str(XDG_CONFIG_HOME), 'zim', OWN_CLIENT_SECRET_NAME)
+    if os.path.isfile(own):
+        return own
+    return BUNDLED_CLIENT_SECRET_FILE
+
+
+CLIENT_SECRET_FILE = find_client_secret_file()
 APPLICATION_NAME = 'googletasks2zim'
 TASK_ANCHOR_SYMBOL = u"\u270b"
 taskAnchorTreeRe = re.compile(r'(\[.\]\s)?\[\[gtasks://([^|]*)\|' + TASK_ANCHOR_SYMBOL + r'\]\]\s?(.*)')
@@ -1039,4 +1059,4 @@ class Cache:
 
 # initial check
 if not os.path.isfile(CLIENT_SECRET_FILE):
-    quit(GoogletasksPlugin.plugin_info["name"] + "CLIENT_SECRET_FILE not found")
+    quit(f"{GoogletasksPlugin.plugin_info['name']}: client secret file not found: {CLIENT_SECRET_FILE}")

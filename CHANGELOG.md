@@ -1,4 +1,7 @@
 # Unreleased
+* new: optional own OAuth client secret (env var `GOOGLETASKS_CLIENT_SECRET_FILE` or `googletasks_client_secret.json` in Zim's config dir); bundled one stays the default
+* new: `install.py --link` and `--uninstall`
+* removed leftover debug menu items `_Test halo*`
 * fix: tasks imported by the nightly cron run were imported again by the next manual import in an already running Zim (the window read the cache file only once, at startup)
 * fix: tasks imported yesterday were imported again today (dedup cache keyed on the volatile etag and dropped past-due tasks that the next import still asks the server for)
 * fix: view no longer jumps to the end of the page when an external process reloads it; the caret keeps its line even when text was inserted above it

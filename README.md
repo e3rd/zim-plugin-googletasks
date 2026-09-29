@@ -22,6 +22,13 @@ Same as for the other plugins, but needs some Google Tasks API dependencies. Pyt
     * When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched. If you need to import all history, just go to the option in `Tools / Google Tasks`.
 * Enjoy
 
+### Own Google client secret (optional)
+By default the plugin uses the bundled `googletasks_client_id.json`. If it hits the Google API quota, create your own OAuth client (type "Desktop app", Tasks API enabled) and point the plugin to its json – the bundled file stays untouched:
+* set the environment variable `GOOGLETASKS_CLIENT_SECRET_FILE=/path/to/client_secret.json` (must be visible to the `zim` process, also in cron), or
+* save it as `googletasks_client_secret.json` into Zim's config dir (`~/.config/zim/` on Linux).
+
+The env var wins over the file, the file wins over the bundled secret. Already granted OAuth tokens belong to the client they were issued for, so after switching, re-grant them via `Tools / Google Tasks / Claim ... access`.
+
 ### Optional
 If you want to synchronise automatically, I recommend using `anacron`. This line helps me get synchronised at 7:30 AM or 5 minutes after computer launch (Ubuntu 17.04) even without restarting Zim:
 ```bash
