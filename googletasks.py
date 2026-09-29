@@ -29,7 +29,7 @@ from zim.formats.wiki import Parser
 from zim.plugins.zim_page_content import insert_after_first_blank_line
 
 try:
-    from zim.gui.widgets import Dialog
+    from zim.gui.widgets import Dialog, ErrorDialog
     from zim.gui.widgets import InputEntry
     from zim.gui.pageview import TextBuffer
     from zim.gui.mainwindow import MainWindow
@@ -44,6 +44,8 @@ except RuntimeError:
 
     class Dialog:
         pass
+
+    ErrorDialog = None
 from zim.formats import CHECKED_BOX, UNCHECKED_BOX
 from zim.main import NotebookCommand
 from zim.main.command import GtkCommand
@@ -191,7 +193,10 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
         ntb_name = self.get_notebook_argument()[0] or self.get_default_or_only_notebook()
         ntb, _ = build_notebook(ntb_name)
         preferences = ConfigManager().get_config_dict('preferences.conf')['GoogletasksPlugin'].dump()
-        GoogletasksController(notebook=ntb, preferences=preferences).fetch(True)  # add new lines
+        controller = GoogletasksController(notebook=ntb, preferences=preferences)
+        controller.fetch(True)  # add new lines
+        if controller.failed:
+            sys.exit(1)  # let cron/anacron notice
 
 
 class GoogleCalendarApi:
@@ -563,19 +568,14 @@ class GoogletasksNewTaskDialog(Dialog):
         self.label_due.set_text(day)
 
     def _load_task(self):
-        # noinspection PyBroadException
         try:
             o = self.input_notes.get_buffer()
             self.task["notes"] = o.get_text(*o.get_bounds(), include_hidden_chars=True)
             self.task["title"] = self.input_title.get_text()
             if self.input_due.get_text():
-                try:
-                    self.task["due"] = self.controller.get_time(from_string=self.input_due.get_text(), mode="morning")
-                except Exception:
-                    logger.error("Failed due date parsing")
-                    raise
-        except Exception:
-            pass
+                self.task["due"] = self.controller.get_time(from_string=self.input_due.get_text(), mode="morning")
+        except Exception as e:
+            self.controller.error("Failed reading the task form", e)
 
     def do_response(self, id_):
         """ we cant use parent function because Esc is not handled as cancel """
@@ -626,6 +626,8 @@ class GoogletasksController:
 
         self.cache = Cache(Path(str(self.notebook.cache_dir), CACHE_FILE)).load()
         self.calendar_api = GoogleCalendarApi(self)
+        self.failed = False
+        "True once error() was called; the headless command turns it into a non-zero exit code"
 
     @property
     def tasklist(self):
@@ -665,10 +667,10 @@ class GoogletasksController:
                 task["status"] = "needsAction"
                 service.tasks().update(tasklist=self.tasklist, task=task_id, body=task).execute()
         except LookupError as e:
-            self.info(e)
+            self.error("Cannot un/check the task", e)
             return False
         except Exception as e:
-            self.info(f'Error in communication while un/checking: {e}')
+            self.error("Error in communication while un/checking", e)
             return False
         self.info(f'Marked as {task["status"]}')
         return True
@@ -691,10 +693,10 @@ class GoogletasksController:
                 service.tasks().insert(tasklist=self.tasklist, body=task).execute()
                 self.info("Task '{}' created.".format(task["title"]))
         except LookupError as e:
-            self.info(e)
+            self.error("Cannot submit the task", e)
             return False
         except Exception as e:
-            self.info(f'Error in communication while sumitting: {e}')
+            self.error("Error in communication while submitting", e)
             return False
         return True
 
@@ -737,10 +739,34 @@ class GoogletasksController:
         # if self.window:
         #     self.window.statusbar.push(0, text)
 
+    def error(self, msg, exc=None, fatal=False):
+        """ Report a problem so that somebody notices it (unlike a bare `logger.error`).
+
+        Always logged. In the GUI it goes to the status bar if this Zim has one; a `fatal` error
+        (or any error when there is no status bar, which Zim 0.74+ lacks) opens an ErrorDialog.
+        Headless (`zim --plugin googletasks`) it is written to stderr and marks the controller
+        as `failed`, which makes the command exit with a non-zero code.
+        """
+        text = f"{msg}: {exc}" if exc else str(msg)
+        logger.error("[Googletasks] %s", text, exc_info=exc if isinstance(exc, BaseException) else None)
+        self.failed = True
+        if not self.window:
+            print(f"[Googletasks] ERROR: {text}", file=sys.stderr)
+            return
+        statusbar = getattr(self.window, "statusbar", None)
+        if statusbar is not None and not fatal:
+            statusbar.push(0, "[Googletasks] " + text)
+        elif ErrorDialog:
+            ErrorDialog(self.window, ("Google Tasks: " + str(msg), str(exc) if exc else "")).run()
+
     def _read_task_list(self, due_min, show_completed=False, service=None):
-        """ In case of an error or no tasks found, informs user in the status bar and raises LookupError. """
+        """ In case of an error or no tasks found, informs user and raises LookupError. """
         if not service:
-            service = self.calendar_api.get_service(info="Reading task list")
+            try:
+                service = self.calendar_api.get_service(info="Reading task list")
+            except Exception as e:  # OAuth flow, missing/invalid client secret, network...
+                self.error("Cannot connect to Google Tasks", e, fatal=True)
+                raise LookupError from e
         try:
             results = service.tasks().list(maxResults=99,
                                            tasklist=self.tasklist,
@@ -750,8 +776,8 @@ class GoogletasksController:
                                            ).execute()
         except (LookupError, httplib2.ServerNotFoundError, Error) as e:
             # self.tasklist property has problem, raises LookupError
-            self.info(e)
-            raise LookupError
+            self.error("Cannot read the task list", e)
+            raise LookupError from e
         items = results.get('items', [])
         if not items:
             self.info('No tasks found.')
@@ -891,11 +917,15 @@ class GoogletasksController:
             # tasks today. The set stays bounded anyway: it is rebuilt from one response each time.
             items_ids.add(item["id"])
             if already_imported:
-                logger.debug('Text already imported {}.'.format(item['title']))
+                logger.debug('Text already imported {}.'.format(item.get("title")))
                 continue
-            logger.info("Appending {}.".format(item["title"]))
+            logger.info("Appending {}.".format(item.get("title")))
             logger.debug(item)
-            texts.append(self.get_task_text(item, self.preferences["include_start_date"]))
+            text = self.get_task_text(item, self.preferences["include_start_date"])
+            if text:
+                texts.append(text)
+            else:
+                self.error(f"Task {item['id']} has no title, skipped")
         self.cache.items_ids = items_ids
 
         # Refreshes page from current configuration
@@ -973,10 +1003,10 @@ class GoogletasksController:
                     try:
                         task = service.tasks().get(task=task_id, tasklist=self.tasklist).execute()
                     except Error as e:
-                        self.info(e)
+                        logger.warning("Task %s not found on the server: %s", task_id, e)
                         unidentified_tasks.append(task_text)
                     except (LookupError, httplib2.ServerNotFoundError) as e:
-                        self.info(e)
+                        self.error("Cannot look up task status", e)
                         allow_single_search = False
                     else:
                         completed = task["status"] == "completed"
@@ -997,10 +1027,8 @@ class GoogletasksController:
         service = self.calendar_api.get_service(info="Refreshing task lists")
         try:
             results = service.tasklists().list().execute()
-        except httplib2.ServerNotFoundError:
-            return False
-        except Error as e:
-            self.info(e)
+        except (httplib2.ServerNotFoundError, Error) as e:
+            self.error("Cannot refresh task lists", e)
             return False
         items = results.get('items', [])
         if not items:

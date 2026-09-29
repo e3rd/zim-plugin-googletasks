@@ -1,4 +1,5 @@
 # Unreleased
+* new: errors are reported (`controller.error`): status bar / error dialog in the GUI, stderr and a non-zero exit code for `zim --plugin googletasks`, instead of vanishing into the log
 * changed: cache is plain versioned JSON instead of jsonpickle (old cache files are migrated once, so nothing is re-imported); `jsonpickle` dependency dropped
 * new: optional own OAuth client secret (env var `GOOGLETASKS_CLIENT_SECRET_FILE` or `googletasks_client_secret.json` in Zim's config dir); bundled one stays the default
 * new: `install.py --link` and `--uninstall`
