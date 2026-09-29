@@ -277,18 +277,6 @@ def restore_cursor_anchor(pageview, anchor):
 
 class GoogletasksWindow(MainWindowExtension):
 
-    @action(_('_Test halo'), menuhints='tools:test')  # T: menu item
-    def instant_search_fd(self):
-        print("test")
-
-    @action(_('_Test halo2'), menuhints='edit')  # T: menu item
-    def instant_search_fd_3(self):
-        print("test")
-
-    @action(_('_Test halo3'), menuhints='notebook:edit')  # T: menu item
-    def instant_search_fd_4(self):
-        print("test")
-
     def __init__(self, plugin, window):
         controller = self.controller = GoogletasksController(
             window=window,
