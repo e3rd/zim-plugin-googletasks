@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import datetime
+import json
 import logging
 import os
 import re
@@ -14,7 +15,6 @@ from typing import TYPE_CHECKING
 
 import dateutil.parser
 import httplib2
-import jsonpickle
 from dateutil.relativedelta import relativedelta
 from gi.repository import Gtk
 from googleapiclient import discovery
@@ -57,6 +57,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger('zim.plugins.googletasks')
 CACHE_FILE = "googletasks.cache"
+CACHE_SCHEMA_VERSION = 1
 WORKDIR = str(XDG_DATA_HOME.folder(('zim', 'plugins')))
 BUNDLED_CLIENT_SECRET_FILE = os.path.join(WORKDIR, 'googletasks_client_id.json')
 CLIENT_SECRET_ENV = 'GOOGLETASKS_CLIENT_SECRET_FILE'
@@ -1036,14 +1037,63 @@ class Cache:
         never learned about the nightly import: the next manual "Import new tasks" still worked
         from the task IDs it had seen at startup, imported the very same tasks a second time and
         then overwrote the cron's cache file with its own outdated copy.
+
+        Loading is tolerant: a file in the old jsonpickle format is migrated (and re-saved in the
+        current format), an unknown or corrupt file yields an empty cache.
         """
         if self.exists() and os.path.getmtime(self._path) != self._mtime:
-            self.__dict__.update(jsonpickle.decode(self._path.read_text()))
-            self._mtime = os.path.getmtime(self._path)
+            mtime = os.path.getmtime(self._path)
+            try:
+                data, migrated = self.parse(self._path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:  # ValueError: json errors, bad encoding
+                logger.warning("Cannot read cache %s, starting with an empty one: %s", self._path, e)
+                data, migrated = None, False
+            data = data or {"items_ids": set(), "lists": {}, "last_fetched": 0}
+            self.__dict__.update(data)
+            self._mtime = mtime
+            if migrated:
+                self.save()
         return self
 
+    @staticmethod
+    def parse(text):
+        """ Cache file content -> ({items_ids, lists, last_fetched}, migrated) or (None, False) if unusable.
+
+        Current format: {"version": 1, "items_ids": [...], "lists": {...}, "last_fetched": float}.
+        Old format (no "version") was written by jsonpickle: plain JSON as well, only the set of IDs
+        is wrapped as {"py/set": [...]}, and the timestamp may be called `date_at` in even older files.
+        We read it as plain JSON so that already imported tasks are not imported again and
+        jsonpickle is not needed.
+        """
+        raw = json.loads(text)
+        if not isinstance(raw, dict):
+            return None, False
+        version = raw.get("version")
+        migrated = version is None
+        if migrated and not {"items_ids", "lists", "last_fetched", "date_at"} & raw.keys():
+            return None, False
+        if version is not None and version != CACHE_SCHEMA_VERSION:
+            return None, False  # written by some future version, we do not know what it means
+        ids = raw.get("items_ids", [])
+        if isinstance(ids, dict):  # jsonpickle set
+            ids = ids.get("py/set", [])
+        lists = raw.get("lists", {})
+        last_fetched = raw.get("last_fetched", raw.get("date_at", 0))
+        if not isinstance(ids, list) or not isinstance(lists, dict) or \
+                not isinstance(last_fetched, (int, float)) or isinstance(last_fetched, bool):
+            return None, False
+        return {"items_ids": {i for i in ids if isinstance(i, str)},
+                "lists": {k: v for k, v in lists.items() if isinstance(k, str) and isinstance(v, str)},
+                "last_fetched": last_fetched}, migrated
+
     def save(self):
-        self._path.write_text(jsonpickle.encode({k: v for k, v in vars(self).items() if not k.startswith('_')}))
+        data = {"version": CACHE_SCHEMA_VERSION,
+                "items_ids": sorted(self.items_ids),
+                "lists": self.lists,
+                "last_fetched": self.last_fetched}
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        tmp.replace(self._path)  # atomic, so that a concurrent reader never sees half a file
         self._mtime = os.path.getmtime(self._path)
 
     def exists(self):
