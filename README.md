@@ -4,6 +4,8 @@ Connects [Zim Wiki](https://zim-wiki.org/) to your default Google Tasks lists. A
 ## Installation
 Same as for the other plugins, but needs some Google Tasks API dependencies. Python3.6+ required.
 * Run `python3 install.py` — installs the pip dependencies and copies `googletasks.py`, `_lib/zim_page_content.py` and `googletasks_client_id.json` into Zim's plugins folder for you.
+    * `python3 install.py --link` symlinks the files instead of copying them (for development: edits apply after restarting Zim)
+    * `python3 install.py --uninstall` removes the installed files again (OAuth tokens, caches and pip packages stay)
 * Or do it by hand:
   * Run `pip install -r requirements.txt --break-system-packages`
   * Put the `googletasks.py`, `_lib/zim_page_content.py` and `googletasks_client_id.json` into the plugins folder
