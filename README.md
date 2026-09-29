@@ -62,3 +62,11 @@ Feel free to tell me in the issues what you'd like it to do.
 
 ## Other tools in this repository
 * `bin/insert_note.py PAGE_FILE TEXT` — inserts an arbitrary line of text into a Zim page from any system script or cron job (not just from Google Tasks), then asks an already-running Zim to pick up the change. See the script's own docstring for how it finds the right notebook/page and avoids duplicating an already-open window.
+
+## Development
+Tests and lint need no Zim, GTK or network (they are stubbed in `tests/conftest.py`):
+```bash
+pip install pytest ruff python-dateutil
+ruff check .
+pytest
+```

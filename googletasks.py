@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
-from __future__ import print_function
+from __future__ import annotations, print_function
 
 import datetime
 import json
@@ -801,7 +801,7 @@ class GoogletasksController:
             return False
         # we dont want to have the task started with: "[ ] [ ] "
         s += task['title'][4:] if task['title'].startswith("[ ] ") else task['title']
-        if include_due and task["due"]:
+        if include_due and task.get("due"):
             d = GoogletasksController.get_time(mode="date-only", from_string=task['due'])
             s += " _{//>" + d + "//}"
         if task.get("notes", ""):  # insert other lines

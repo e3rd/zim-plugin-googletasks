@@ -1,0 +1,16 @@
+# Only tool configuration (ruff, pytest) - this project is not a package, see install.py for deployment.
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["starsi", ".vscode"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"bin/insert_note.py" = ["E402"]  # must tweak warnings/sys.path before importing zim
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "_lib"]
