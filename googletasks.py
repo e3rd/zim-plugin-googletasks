@@ -573,8 +573,16 @@ class GoogletasksNewTaskDialog(Dialog):
         hbox.pack_start(self.label_due, expand=True, fill=True, padding=0)
         self.vbox.pack_start(hbox, expand=False, fill=True, padding=0)
 
-        # notes
-        self.vbox.pack_start(self.input_notes, expand=False, fill=True, padding=0)
+        # notes; TextView has no placeholder in GTK 3, a dimmed label over it shows while it is empty
+        placeholder = Gtk.Label(label="description", halign=Gtk.Align.START, valign=Gtk.Align.START)
+        placeholder.get_style_context().add_class("dim-label")
+        notes_buffer = self.input_notes.get_buffer()
+        notes_buffer.connect("changed", lambda b: placeholder.set_visible(not b.get_char_count()))
+        overlay = Gtk.Overlay()
+        overlay.add(self.input_notes)
+        overlay.add_overlay(placeholder)
+        overlay.set_overlay_pass_through(placeholder, True)  # clicks reach the text view
+        self.vbox.pack_start(overlay, expand=False, fill=True, padding=0)
 
         # task list (the primary one, or the one the edited task lives in)
         self._setup_list_choice()
@@ -630,6 +638,7 @@ class GoogletasksNewTaskDialog(Dialog):
 
         # display window
         self.show_all()
+        notes_buffer.emit("changed")  # hide the placeholder when the notes are prefilled
         return self
 
     def _setup_list_choice(self):
