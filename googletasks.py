@@ -660,7 +660,14 @@ class GoogletasksNewTaskDialog(Dialog):
             current = self.list_ids[0]
         self.initial_list = self.list_ids.index(current) if current in self.list_ids else 0
         self.input_list.set_active(self.initial_list)
-        self.vbox.pack_start(self.input_list, expand=False, fill=True, padding=0)
+        # Alt+L pops the lists up (a mnemonic would only focus the combo box)
+        label = Gtk.Label.new_with_mnemonic("_List: ")
+        label.set_mnemonic_widget(self.input_list)
+        self.input_list.connect("mnemonic-activate", lambda combo, _: combo.popup() or True)
+        hbox = Gtk.HBox()
+        hbox.pack_start(label, expand=False, fill=True, padding=0)
+        hbox.pack_start(self.input_list, expand=True, fill=True, padding=0)
+        self.vbox.pack_start(hbox, expand=False, fill=True, padding=0)
 
     def _slippy_date(self, add_days=0, next_monday=False, relative_delta=None):
 
