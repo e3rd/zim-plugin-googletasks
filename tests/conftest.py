@@ -47,7 +47,7 @@ def load_plugin_module(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOGLETASKS_CLIENT_SECRET_FILE", str(secret))
     monkeypatch.setattr(builtins, "_", lambda s: s, raising=False)  # Zim installs gettext as `_`
 
-    gi_repository = _module("gi.repository", Gtk=types.SimpleNamespace())
+    gi_repository = _module("gi.repository", Gtk=types.SimpleNamespace(), GLib=types.SimpleNamespace())
     _module("gi", repository=gi_repository)
 
     class GoogleError(Exception):

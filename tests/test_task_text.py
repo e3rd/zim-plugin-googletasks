@@ -51,22 +51,35 @@ def test_anchor_regex_roundtrip(gt):
     line = gt.GoogletasksController.get_task_text(task).split("\n")[0]
     m = gt.taskAnchorTreeRe.match(line)
     assert m[1] == "[ ] "
-    assert m[2] == task["id"]
-    assert m[3] == task["title"]
+    assert m[2] is None
+    assert m[3] == task["id"]
+    assert m[5] == task["title"]
 
 
 def test_anchor_regex_completed_and_without_checkbox(gt):
     m = gt.taskAnchorTreeRe.match("[*] [[gtasks://a1|✋]] done")
-    assert (m[1], m[2], m[3]) == ("[*] ", "a1", "done")
+    assert (m[1], m[2], m[3], m[4], m[5]) == ("[*] ", None, "a1", "✋", "done")
     m = gt.taskAnchorTreeRe.match("[[gtasks://a1|✋]] bare")
-    assert (m[1], m[2], m[3]) == (None, "a1", "bare")
+    assert (m[1], m[3], m[5]) == (None, "a1", "bare")
     assert gt.taskAnchorTreeRe.match("[ ] ordinary checkbox") is None
+
+
+def test_get_task_text_with_list_and_icon(gt):
+    text = gt.GoogletasksController.get_task_text({"id": "abc", "title": "Report"}, list_id="L1", icon="💼")
+    assert text == "[ ] [[gtasks://L1/abc|💼]] Report"
+    m = gt.taskAnchorTreeRe.match(text)
+    assert (m[2], m[3], m[4], m[5]) == ("L1", "abc", "💼", "Report")
+
+
+def test_anchor_regex_default_list(gt):
+    m = gt.taskAnchorTreeRe.match("[ ] [[gtasks://@default/abc|✋]] x")
+    assert (m[2], m[3]) == ("@default", "abc")
 
 
 def test_start_date_in_title_roundtrip(gt):
     task = {"id": "1", "title": "test 13", "due": "2020-06-03T00:00:00.000Z"}
     line = gt.GoogletasksController.get_task_text(task, include_due=True)
-    title = gt.taskAnchorTreeRe.match(line)[3]
+    title = gt.taskAnchorTreeRe.match(line)[5]
     m = gt.start_date_in_title.match(title)
     assert m[2] == "2020-06-03"
     assert (m[1] + m[4]).replace("_{////}", "").rstrip() == "test 13"

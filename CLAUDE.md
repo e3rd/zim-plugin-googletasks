@@ -29,23 +29,23 @@ There is no build system, test suite, or Python package structure — just a plu
 Everything lives in [googletasks.py](googletasks.py), organized around a few classes:
 
 - **`GoogletasksPlugin`** (`PluginClass`): plugin registration and preference schema (`plugin_notebook_properties`) — these are the Notebook Properties surfaced in Zim's UI. Also monkeypatches `TextBuffer.set_bullet` at init so that ticking/unticking a checkbox in the editor routes through `GoogletasksController.task_checked` before Zim's own bullet logic runs.
-- **`GoogletasksWindow`** (`MainWindowExtension`): per-window UI glue — builds the `Tools / Google Tasks` menu (`_add_actions`), and wires menu actions (import, sync, add task, choose task list, claim OAuth permissions) to controller methods. One instance exists per open Zim window; each owns its own `GoogletasksController`.
-- **`GoogletasksController`**: the actual logic — fetching/importing tasks (`fetch`), writing tasks into the page (`_store_to_page`), pushing local edits to the server (`submit_task`, `task_checked`), pulling status back down (`sync_bullets_from_server`), and task-list management (`tasklist` property, `refresh_task_lists`). This is the class to read first when tracing any feature.
+- **`GoogletasksWindow`** (`MainWindowExtension`): per-window UI glue — builds the `Tools / Google Tasks` menu (`_add_actions`), and wires menu actions (import, sync, add task, the `Task lists` check items, claim OAuth permissions) to controller methods. One instance exists per open Zim window; each owns its own `GoogletasksController`.
+- **`GoogletasksController`**: the actual logic — fetching/importing tasks (`fetch`), writing tasks into the page (`_store_to_page`), pushing local edits to the server (`submit_task`, `task_checked`), pulling status back down (`sync_bullets_from_server`), and task-list management (`tasklists`, `list_id`, `chosen_lists`, `toggle_list`, `refresh_task_lists`). This is the class to read first when tracing any feature.
 - **`GoogleCalendarApi`**: thin wrapper around Google's `discovery.build('tasks', 'v1', ...)`, handling the OAuth2 flow (`oauth2client`) and two separate credential/scope pairs — read-only vs. write access are stored and requested as distinct credential files (`googletasks_oauth.json` / `googletasks_oauth_write.json`), so a user can grant read access without also granting write.
 - **`Cache`**: a `jsonpickle`-serialized sidecar file (`googletasks.cache`, stored in the notebook's cache dir) tracking already-imported task etags (`items_ids`), known task lists (`lists`), and the last fetch timestamp — this is what prevents re-importing the same task twice and drives the "only fetch since last sync" window in `fetch()`.
 - **`GoogletasksNewTaskDialog`** (`Dialog`): the "create/update task" popup, including the relative postponing-date buttons (Monday, next month, +3/6 months, etc.) configured via preferences.
 
 ### Task representation in Zim pages
 
-Imported tasks are Zim checkbox lines with an embedded link back to the Google task ID, e.g.:
+Imported tasks are Zim checkbox lines with an embedded link back to the Google list and task ID, e.g.:
 ```
-[ ] [[gtasks://<task_id>|✋]] Task title
+[ ] [[gtasks://<list_id>/<task_id>|💼]] Task title
 ```
-`TASK_ANCHOR_SYMBOL` (✋) marks the anchor link; `taskAnchorTreeRe` is the regex used everywhere to parse this pattern back out of page text (both when syncing status and when reading a task the user is editing). Optional inline start-date markup (`_{//>2021-01-01//}`, parsed via `start_date_in_title`) records a "not before this date" hint the plugin also uses to prefill the date field in the new-task dialog.
+The link label is the icon of the list (`parse_tasklists`: the `tasklist` preference `My Tasks, Work=💼` → `[(title, icon)]`, missing icons filled from `LIST_ICONS`, ✋ = `TASK_ANCHOR_SYMBOL` first). `taskAnchorTreeRe` parses it back (groups: checkbox, list ID, task ID, icon, text); links written before multi-list support have no `<list_id>/` part and are treated as the primary (first chosen) list. `get_task_id` finds the link by its `gtasks://` href, not by the icon. Optional inline start-date markup (`_{//>2021-01-01//}`, parsed via `start_date_in_title`) records a "not before this date" hint the plugin also uses to prefill the date field in the new-task dialog.
 
 ### Key data flow
 
-1. **Import** (`fetch`): read tasks due since last sync (or since midnight, on first run) → skip ones already in `cache.items_ids` → format new ones via `get_task_text` → insert after the first blank line of the target page (home page by default, or the page set in preferences).
+1. **Import** (`fetch` → `_read_chosen_lists` → `_read_task_list`, paged via `nextPageToken`): read tasks of every chosen list due since last sync (or since midnight, on first run) → skip ones already in `cache.items_ids` → format new ones via `get_task_text` → insert after the first blank line of the target page (home page by default, or the page set in preferences).
 2. **Checkbox → server** (via the `set_bullet` monkeypatch): ticking/unticking a task's checkbox in the editor calls `task_checked`, which patches (complete) or fully re-updates (un-complete, since Google auto-adds a `completed` field that must be stripped) the task on the server.
 3. **Server → checkbox** (`sync_bullets_from_server`): fetches recent+completed tasks in one batch call (last 14 days) to build a status cache, falls back to per-task lookups for anything outside that window, then rewrites checkbox state for every matching line on the page.
 
@@ -53,4 +53,16 @@ Imported tasks are Zim checkbox lines with an embedded link back to the Google t
 
 - The `Dialog` import is wrapped in a `try/except RuntimeError` fallback to a stub class — this works around a GTK clipboard init crash seen when invoking the plugin from the command line (headless, no display).
 - `monkeypatch_method` is idempotent (checks for an existing `_original` attribute) because `TextBuffer.set_bullet` is a *class*-level method shared across all open notebooks/windows — the current controller is looked up per-call via `self.notebook.plugin_googletasks`, not via closure, precisely to support multiple simultaneous Zim windows/notebooks.
-- `tasklist` (the property) resolves a human-readable list *title* (from preferences) to the server-side list *ID* via `cache.lists`, refreshing the cache once if the title isn't found yet.
+- `list_id(title)` resolves a human-readable list *title* (from preferences) to the server-side list *ID* via `cache.lists`, refreshing the cache once if the title isn't found yet. `@default` is passed to the API as is; `refresh_task_lists` keeps the default list first in `cache.lists`, which `chosen_lists()` relies on to show it under its real title in the menu.
+- If one of several lists cannot be read, `fetch` imports the others but keeps the old `items_ids` and does not move `last_fetched` on, so the failed list is neither re-imported nor skipped next time.
+- The `Task lists` menu is built dynamically (`build_list_menu`, `Gtk.ToggleAction`s inside a UIManager `<placeholder>`), rebuilt after refresh/toggle; its merge ids go to `_uimanager_ids` so the parent's `teardown()` removes them.
+
+## Open work / decisions
+
+Open ideas and tasks live as GitHub issues: https://github.com/e3rd/edvard-hub/issues?q=label:"project: googletasks2zim"
+
+Decided *not* to do (don't re-propose without a new reason):
+
+- **Periodic sync inside the plugin** (GLib timeout instead of cron) — cron/anacron has its place: it runs even when Zim isn't running, is visible in the system and can be run manually. A timer inside the GUI would only duplicate that.
+- **Removing `googletasks_client_id.json` from the repo** — rarely used project; it stays in the repo so anyone can run it without creating their own Google project. (Optional own client secret is tracked as an issue.)
+- **Description/notes of a task as a separate feature** — already works (`get_task_text` appends notes as extra lines, the dialog can edit them); the remaining gaps (notes not indented, edits not pushed) belong to the "sync title/due to server" issue.

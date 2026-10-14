@@ -1,4 +1,7 @@
 # Unreleased
+* new: import from multiple task lists at once, each with its own icon (`Task lists` property / check items in `Tools / Google Tasks / Task lists`); the task dialog chooses (or moves to) the list
+* enh: Tab / Shift+Tab in the task dialog's notes moves the focus instead of getting stuck there
+* fix: only the first 99 tasks were read from the server (no paging), the rest were never imported
 * new: pytest suite (no GTK/network needed) and GitHub Actions CI (ruff + pytest, Python 3.9-3.13)
 * fix: `get_task_text` crashed on a task without due date when start dates are included
 * new: errors are reported (`controller.error`): status bar / error dialog in the GUI, stderr and a non-zero exit code for `zim --plugin googletasks`, instead of vanishing into the log

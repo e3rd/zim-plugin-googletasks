@@ -1,5 +1,5 @@
 # Google tasks plugin for Zim Wiki
-Connects [Zim Wiki](https://zim-wiki.org/) to your default Google Tasks lists. Append today's tasks to your Home file. Every task should be imported only once. If you change the tasks, you can upload it back to Google server. If you complete it, the completion should propagate back as well.
+Connects [Zim Wiki](https://zim-wiki.org/) to your Google Tasks lists – the default one, or several at once, each marked by its own icon. Append today's tasks to your Home file. Every task should be imported only once. If you change the tasks, you can upload it back to Google server. If you complete it, the completion should propagate back as well.
 
 ## Installation
 Same as for the other plugins, but needs some Google Tasks API dependencies. Python3.6+ required.
@@ -16,7 +16,8 @@ Same as for the other plugins, but needs some Google Tasks API dependencies. Pyt
     * Import new tasks on Zim startup?
     * Sync current tasks status before import automatically? (May take a long time.)
     * Page to be updated (empty = homepage)
-    * Task list name on server (empty = default task list)
+    * Task lists to import (empty = default task list) – comma separated titles, each optionally with an icon: `My Tasks, Work=💼`. Lists without an icon get one from the palette ✋ 💼 🏠 🛒 📚 ⭐ 🔧 🎯. The first list is where new tasks go by default. A single title (as in older versions) still works.
+        * You can also check the lists in `Tools / Google Tasks / Task lists` (`Refresh task lists` loads them from the server); that edits this field for you, and the menu follows whatever you write here. Use the field to reorder the lists or pick the icons.
     * Include start date – if true, when imported, tasks receive little **[start date](https://www.zim-wiki.org/manual/Plugins/Task_List.html)** string, ex: ">2021-01-01", and when you create a task from cursor or selection, this start time is pre-filled
 * Go to `Tools / Google Tasks / Import new tasks` which imports current tasks that have not been yet imported before
     * When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched. If you need to import all history, just go to the option in `Tools / Google Tasks`.
@@ -47,7 +48,8 @@ The plugin touches Zim internals, so the exact Zim version matters. The one diff
 | 0.75 and newer | current master | Uses `XDG_DATA_HOME.folder`. |
 
 ## How the propagation works?
- * When importing, the task will preserve it's Google-ID in a small link.
+ * When importing, the task will preserve it's Google-ID (and the ID of its list) in a small link, ex: `[[gtasks://<list>/<task>|💼]]`; the icon tells the lists apart. Links written by older versions (`gtasks://<task>`) belong to the first chosen list.
+ * When creating or updating a task, the dialog lets you choose its list (if more are chosen); changing it for an existing task moves it on the server.
  * If you complete the checkbox of zim-task, the plugin searches for this link and marks the task completed on server.
  * If you synchronize tasks status from server, every task on the task page will become un/checked according to the server status.
 

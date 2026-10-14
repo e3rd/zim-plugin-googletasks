@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import dateutil.parser
 import httplib2
 from dateutil.relativedelta import relativedelta
-from gi.repository import Gtk
+from gi.repository import GLib, Gtk
 from googleapiclient import discovery
 from googleapiclient.errors import Error
 from oauth2client import client, tools
@@ -84,16 +84,49 @@ def find_client_secret_file():
 CLIENT_SECRET_FILE = find_client_secret_file()
 APPLICATION_NAME = 'googletasks2zim'
 TASK_ANCHOR_SYMBOL = u"\u270b"
-taskAnchorTreeRe = re.compile(r'(\[.\]\s)?\[\[gtasks://([^|]*)\|' + TASK_ANCHOR_SYMBOL + r'\]\]\s?(.*)')
+LIST_ICONS = (TASK_ANCHOR_SYMBOL, "💼", "🏠", "🛒", "📚", "⭐", "🔧", "🎯")
+"icons given in turn to the task lists that have no icon of their own in the preferences"
+DEFAULT_LIST = "@default"
+taskAnchorTreeRe = re.compile(r'(\[.\]\s)?\[\[gtasks://(?:([^/|\]]*)/)?([^/|\]]*)\|([^\]]*)\]\]\s?(.*)')
+""" A task line: 1 checkbox, 2 list ID (missing in links written before multiple lists were supported),
+    3 task ID, 4 icon, 5 task text. Ex: `[ ] [[gtasks://<list_id>/<task_id>|💼]] Task title` """
 start_date_in_title = re.compile(r'(.*)>(\d{4}-\d{2}(-\d{2})?)(.*)')  # (_\{//)?  (//})?
 INVALID_DAY = "N/A"
+
+
+def parse_tasklists(pref):
+    """ Preference string -> [(title, icon)] of the task lists to work with, the first one being primary.
+
+    'My Tasks, Work=💼' -> [('My Tasks', '✋'), ('Work', '💼')]. Lists with no icon get the first unused one
+    from LIST_ICONS. An empty string means just the default list - the only behaviour before
+    multiple lists were supported, as was a single title.
+    """
+    entries = []
+    for part in (pref or "").split(","):
+        title, _sep, icon = part.partition("=")
+        title, icon = title.strip(), re.sub(r"[|\]\[/]", "", icon).strip()  # the icon goes into a link label
+        if title and title not in (t for t, _i in entries):
+            entries.append([title, icon])
+    if not entries:
+        entries = [[DEFAULT_LIST, ""]]
+    free = (i for i in LIST_ICONS if i not in {icon for _t, icon in entries})
+    for entry in entries:
+        if not entry[1]:
+            entry[1] = next(free, TASK_ANCHOR_SYMBOL)
+    return [tuple(e) for e in entries]
+
+
+def format_tasklists(entries):
+    """ [(title, icon)] -> preference string, the counterpart of parse_tasklists """
+    return ", ".join(f"{title}={icon}" if icon else title for title, icon in entries)
 
 
 class GoogletasksPlugin(PluginClass):
     plugin_info = {
         'name': _('Google Tasks'),
         'description': _('''\
-Connects to your default Google Tasks lists. Append today's tasks to your Home file. At first run,
+Connects to your Google Tasks lists (the default one or the ones chosen, each marked by its own icon).
+Append today's tasks to your Home file. At first run,
 it appends today's tasks; next, it'll append new tasks added since last synchronisation every Zim startup
  (and every day, when set in anacron). Every task should be imported only once, unless changed on the server.
 
@@ -117,7 +150,9 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
                                          '\nStandard Zim notation, ex: ">2021-01-01" means you want'
                                          ' the task to appear not sooner than in January.'), False),
         ('page', 'page', _('Page to be updated (empty = homepage)'), ""),
-        ('tasklist', 'string', _('Task list name on server (empty = default)'), ""),
+        ('tasklist', 'string', _('Task lists to import (empty = default)'
+                                 '\nComma separated, optionally with an icon, ex: "My Tasks, Work=💼".'
+                                 '\nThe first one is used for new tasks.'), ""),
         ('postponing_days', 'int', _('Submitting a task: how many day buttons'), 9, (0, 40)),
         ('button_monday', 'bool', _('Monday button'), True),
         ('button_next_monday', 'bool', _('Next Monday button (Monday in two weeks)'), True),
@@ -140,8 +175,8 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
             # However we can use previously set self.notebook.self.plugin_googletasks
             if bullet in [CHECKED_BOX, UNCHECKED_BOX]:
                 controller: GoogletasksController = self.notebook.plugin_googletasks
-                task_id = controller.get_task_id(line, buffer=self)
-                if task_id and not controller.task_checked(task_id, bullet):
+                list_id, task_id = controller.get_task_id(line, buffer=self)
+                if task_id and not controller.task_checked(list_id, task_id, bullet):
                     return
             self.set_bullet_original(line, bullet, indent=indent)
 
@@ -340,16 +375,6 @@ class GoogletasksWindow(MainWindowExtension):
             if permissions:
                 permissions = ["<separator/>"] + permissions
 
-            lists = []
-            for title in self.controller.cache.lists:
-                # Apostrophe suppressed; I was not able to reliably slash it, getting a strange error:
-                # gi.repository.GLib.GError: g-markup-error-quark: Error on line 12 char 82:
-                # Odd character “l”, expected a “=” after attribute name “s” of element “menuitem” (2)
-                el = "change_list_{}".format(title.replace(r"'", r""))
-                lists.append(f"<menuitem action='{el}'/>")
-                action_group.add_actions((
-                    (el, None, _(f'_{title}'), None, None, self.controller.change_task_list_closure(title)),))
-
             xml = '''
                     <ui>
                     <menubar name='menubar'>
@@ -362,7 +387,7 @@ class GoogletasksWindow(MainWindowExtension):
                                     <menuitem action='import_history'/>
                                     ''' + "\n".join(permissions) + '''
                                     <menu action='choose_task_list'>
-                                        ''' + "\n".join(lists) + '''
+                                        <placeholder name='googletasks_lists'/>
                                         <separator/>
                                         <menuitem action='refresh_task_lists'/>
                                     </menu>
@@ -374,8 +399,61 @@ class GoogletasksWindow(MainWindowExtension):
 
             # Add menu actions seen in XML
             action_group.add_actions((('googletasks_menu', None, _('_Google tasks')),))
-            action_group.add_actions((('choose_task_list', None, _('_Choose task list')),))
-            self._uimanager.add_ui_from_string(xml)
+            action_group.add_actions((('choose_task_list', None, _('_Task lists')),))
+            # (the ids are what the parent's teardown() removes when the plugin gets disabled)
+            self._uimanager_ids = [self._uimanager.add_ui_from_string(xml)]
+            self._list_actions = []
+            self._lists_ui_id = None
+            self._menu_tasklist = None
+            self.build_list_menu()
+            # the menu follows the `tasklist` property, whether edited here or in File / Properties
+            self.connectto(self.controller.preferences, 'changed', self._preferences_changed)
+
+    def _preferences_changed(self, _preferences):
+        if self.controller.preferences["tasklist"] != self._menu_tasklist:
+            # not from within the signal of the very action being replaced (when toggled in the menu)
+            GLib.idle_add(self.build_list_menu)
+
+    def build_list_menu(self):
+        """ (Re)build the task lists in `Tools / Google Tasks / Task lists`: a check item per list known
+            from the server. Checked lists are imported, toggling one edits the `tasklist` preference. """
+        action_group = self.actiongroup
+        if self._lists_ui_id is not None:
+            self._uimanager.remove_ui(self._lists_ui_id)
+            self._uimanager_ids.remove(self._lists_ui_id)
+        for gtk_action in self._list_actions:
+            action_group.remove_action(gtk_action)
+        self._list_actions = []
+        self._menu_tasklist = self.controller.preferences["tasklist"]
+
+        icons = self.controller.chosen_lists()
+        items = []
+        for title in self.controller.cache.lists:
+            # Apostrophe suppressed; I was not able to reliably slash it, getting a strange error:
+            # gi.repository.GLib.GError: g-markup-error-quark: Error on line 12 char 82:
+            # Odd character “l”, expected a “=” after attribute name “s” of element “menuitem” (2)
+            el = "change_list_{}".format(title.replace(r"'", r""))
+            # menu labels are mnemonic, a single underscore in the title would vanish
+            gtk_action = Gtk.ToggleAction(name=el, label=f"{icons.get(title, '   ')} {title.replace('_', '__')}")
+            gtk_action.set_active(title in icons)
+            gtk_action.connect("toggled", self._list_toggled, title)
+            action_group.add_action(gtk_action)
+            self._list_actions.append(gtk_action)
+            items.append(f"<menuitem action='{el}'/>")
+
+        self._lists_ui_id = self._uimanager.add_ui_from_string('''
+            <ui><menubar name='menubar'><menu action='tools_menu'><menu action='googletasks_menu'>
+                <menu action='choose_task_list'><placeholder name='googletasks_lists'>
+                ''' + "\n".join(items) + '''
+                </placeholder></menu>
+            </menu></menu></menubar></ui>''')
+        self._uimanager_ids.append(self._lists_ui_id)
+
+    def _list_toggled(self, gtk_action, title):
+        self.controller.toggle_list(title, gtk_action.get_active())
+        chosen = title in self.controller.chosen_lists()
+        if gtk_action.get_active() != chosen:  # refused (the last list cannot be unchosen)
+            gtk_action.set_active(chosen)
 
     @action(_('_Task from cursor or selection...'), accelerator='<ctrl><alt><shift>g')  # T: menu item
     def send_as_task(self):
@@ -445,7 +523,8 @@ class GoogletasksWindow(MainWindowExtension):
 
     @action(_('_Refresh task lists'))  # T: menu item
     def refresh_task_lists(self):
-        self.controller.refresh_task_lists()
+        if self.controller.refresh_task_lists():
+            self.build_list_menu()
 
 
 class GoogletasksNewTaskDialog(Dialog):
@@ -456,6 +535,10 @@ class GoogletasksNewTaskDialog(Dialog):
         self.input_notes = None
         self.label_object = None
         self.label_due = None
+        self.input_list = None
+        self.list_ids = []
+        "IDs of the task lists offered in input_list, in the same order"
+        self.initial_list = 0
         self.task = task
         self.controller = controller
         super().__init__(*args, **kwargs)
@@ -473,6 +556,7 @@ class GoogletasksNewTaskDialog(Dialog):
         self.input_title = InputEntry(allow_empty=False, placeholder_text="task title")
         self.vbox.pack_start(self.input_title, expand=False, fill=True, padding=0)
         self.input_notes = Gtk.TextView()
+        self.input_notes.set_accepts_tab(False)  # Tab / Shift+Tab move the focus, not insert a tab
 
         # date field
         self.input_due = InputEntry(allow_empty=False)
@@ -488,8 +572,11 @@ class GoogletasksNewTaskDialog(Dialog):
         hbox.pack_start(self.label_due, expand=True, fill=True, padding=0)
         self.vbox.pack_start(hbox, expand=False, fill=True, padding=0)
 
-        # we cant tab out from notes textarea field, hence its placed under date
+        # notes
         self.vbox.pack_start(self.input_notes, expand=False, fill=True, padding=0)
+
+        # task list (the primary one, or the one the edited task lives in)
+        self._setup_list_choice()
 
         # arbitrary postponing buttons
         hbox = Gtk.HBox()
@@ -544,6 +631,27 @@ class GoogletasksNewTaskDialog(Dialog):
         self.show_all()
         return self
 
+    def _setup_list_choice(self):
+        """ Offer the chosen task lists; with a single one, there is nothing to choose. """
+        self.input_list = Gtk.ComboBoxText()
+        for title, icon in self.controller.chosen_lists().items():
+            try:
+                self.list_ids.append(self.controller.list_id(title))
+            except LookupError as e:
+                self.controller.error("Cannot offer the task list", e)
+                continue
+            self.input_list.append_text(f"{icon} {title}")
+        if len(self.list_ids) < 2:
+            return
+        current = self.task.get("_list_id")
+        if current == DEFAULT_LIST and self.controller.cache.lists:  # the default list is the first one cached
+            current = next(iter(self.controller.cache.lists.values()))
+        if self.task.get("id") and not current:  # link written before multiple lists were supported
+            current = self.list_ids[0]
+        self.initial_list = self.list_ids.index(current) if current in self.list_ids else 0
+        self.input_list.set_active(self.initial_list)
+        self.vbox.pack_start(self.input_list, expand=False, fill=True, padding=0)
+
     def _slippy_date(self, add_days=0, next_monday=False, relative_delta=None):
 
         def next_weekday(d, weekday):
@@ -574,6 +682,9 @@ class GoogletasksNewTaskDialog(Dialog):
             self.task["title"] = self.input_title.get_text()
             if self.input_due.get_text():
                 self.task["due"] = self.controller.get_time(from_string=self.input_due.get_text(), mode="morning")
+            chosen = self.input_list.get_active()
+            if len(self.list_ids) > 1 and chosen not in (-1, self.initial_list):
+                self.task["_target_list_id"] = self.list_ids[chosen]
         except Exception as e:
             self.controller.error("Failed reading the task form", e)
 
@@ -595,7 +706,9 @@ class GoogletasksNewTaskDialog(Dialog):
 
     def do_response_cancel(self):
         """ something failed, restore original text in the zim-page """
-        text = self.controller.get_task_text(self.task, self.controller.preferences["include_start_date"])
+        text = self.controller.get_task_text(self.task, self.controller.preferences["include_start_date"],
+                                             self.task.get("_list_id"),
+                                             self.controller.list_icon(self.task.get("_list_id")))
         if text:
             buffer = self.controller.window.pageview.textview.get_buffer()
             buffer.insert_parsetree_at_cursor(Parser().parse(text))
@@ -630,42 +743,74 @@ class GoogletasksController:
         "True once error() was called; the headless command turns it into a non-zero exit code"
 
     @property
-    def tasklist(self):
+    def tasklists(self):
+        """ [(title, icon)] of the task lists chosen in the preferences, the first one being primary """
+        return parse_tasklists(self.preferences["tasklist"])
+
+    def list_id(self, title):
         """ Returns task list ID from cache (or fetches new one).
         If task list ID cannot be fetched, raise LookupError."""
         # we have to pass ID or @default as task list
-        list_title = self.preferences["tasklist"]
-        if not list_title or list_title == "@default":
-            # It is more user friendly to let the parameter empty for the default task list.
-            # Plus, the string '@default' is never in the cache.
-            return "@default"
-        if list_title not in self.cache.lists:
+        if title == DEFAULT_LIST:  # never in the cache
+            return DEFAULT_LIST
+        if title not in self.cache.lists:
             self.refresh_task_lists()
-            if list_title not in self.cache.lists:
-                raise LookupError(f"Cannot identify task list {list_title}")
-        return self.cache.lists[list_title]
+            if title not in self.cache.lists:
+                raise LookupError(f"Cannot identify task list {title}")
+        return self.cache.lists[title]
 
-    def change_task_list_closure(self, title):
-        def _(_):
-            self.preferences["tasklist"] = title
-            self.info(f"Task list changed to {title}")
+    @property
+    def primary_list_id(self):
+        """ The list new tasks go to and that the task links written before multiple lists were supported
+            belong to (they could only point to the single list set in the preferences). """
+        return self.list_id(self.tasklists[0][0])
 
-        return _
+    def list_icon(self, list_id):
+        for title, icon in self.tasklists:
+            if self.cache.lists.get(title, title) == list_id:
+                return icon
+        return TASK_ANCHOR_SYMBOL
 
-    def task_checked(self, task_id, bullet):
-        """ un/mark task on Google server """
+    def chosen_lists(self):
+        """ {title: icon} of the chosen lists, '@default' replaced by the real title of the default list
+            when known (refresh_task_lists() keeps the default list first in the cache). """
+        default_title = next(iter(self.cache.lists), DEFAULT_LIST)
+        return {(default_title if title == DEFAULT_LIST else title): icon for title, icon in self.tasklists}
+
+    def toggle_list(self, title, active):
+        """ Add the list to the imported ones or remove it from them, keeping the icons already given
+            (written explicitly, so that the remaining lists do not swap their icons). """
+        lists = self.chosen_lists()
+        if active and title not in lists:
+            lists[title] = ""
+            lists = dict(parse_tasklists(format_tasklists(lists.items())))
+        elif not active and title in lists:
+            if len(lists) == 1:
+                self.info("At least one task list must stay chosen")
+                return
+            del lists[title]
+        else:
+            return
+        self.preferences["tasklist"] = format_tasklists(lists.items())
+        self.info(f"Task lists changed to {self.preferences['tasklist']}")
+
+    def task_checked(self, list_id, task_id, bullet):
+        """ un/mark task on Google server
+        :param list_id: None for the links written before multiple lists were supported
+        """
         task = {"status": "completed" if bullet is CHECKED_BOX else "needsAction"}
         service = self.calendar_api.get_service(write_access=True,
                                                 info=f"Marking task ID {task_id} as {task['status']}")
 
         try:
+            list_id = list_id or self.primary_list_id
             if bullet is CHECKED_BOX:  # small patch will be sufficient
-                service.tasks().patch(tasklist=self.tasklist, task=task_id, body=task).execute()
+                service.tasks().patch(tasklist=list_id, task=task_id, body=task).execute()
             else:  # we need to delete the automatically generated completed field, need to do a whole update
-                task = service.tasks().get(tasklist=self.tasklist, task=task_id).execute()
+                task = service.tasks().get(tasklist=list_id, task=task_id).execute()
                 task.pop("completed", None)
                 task["status"] = "needsAction"
-                service.tasks().update(tasklist=self.tasklist, task=task_id, body=task).execute()
+                service.tasks().update(tasklist=list_id, task=task_id, body=task).execute()
         except LookupError as e:
             self.error("Cannot un/check the task", e)
             return False
@@ -676,21 +821,30 @@ class GoogletasksController:
         return True
 
     def submit_task(self, task=None):
-        """ Upload task to Google server """
+        """ Upload task to Google server
+        :param task: Besides the Google fields, `_list_id` is the list an existing task lives in
+            (None for the links written before multiple lists were supported) and `_target_list_id`
+            the list the task should go to (if differs, an existing task is moved there).
+        """
         if task is None:
             task = {}
         if "due" not in task:  # fallback - default is to postpone the task by a day
             task["due"] = self.get_time(add_days=1, mode="morning")
+        body = {k: v for k, v in task.items() if not k.startswith("_")}
 
         service = self.calendar_api.get_service(write_access=True, info=f"Submitting task {task.get('title')}")
 
         # noinspection PyBroadException
         try:
+            source = task.get("_list_id") or self.primary_list_id
+            target = task.get("_target_list_id") or source
             if "id" in task:
-                service.tasks().patch(tasklist=self.tasklist, task=task["id"], body=task).execute()
+                if target != source:
+                    service.tasks().move(tasklist=source, task=task["id"], destinationTasklist=target).execute()
+                service.tasks().patch(tasklist=target, task=task["id"], body=body).execute()
                 self.info("Task '{}' updated.".format(task["title"]))
             else:
-                service.tasks().insert(tasklist=self.tasklist, body=task).execute()
+                service.tasks().insert(tasklist=target, body=body).execute()
                 self.info("Task '{}' created.".format(task["title"]))
         except LookupError as e:
             self.error("Cannot submit the task", e)
@@ -759,43 +913,73 @@ class GoogletasksController:
         elif ErrorDialog:
             ErrorDialog(self.window, ("Google Tasks: " + str(msg), str(exc) if exc else "")).run()
 
-    def _read_task_list(self, due_min, show_completed=False, service=None):
-        """ In case of an error or no tasks found, informs user and raises LookupError. """
-        if not service:
-            try:
-                service = self.calendar_api.get_service(info="Reading task list")
-            except Exception as e:  # OAuth flow, missing/invalid client secret, network...
-                self.error("Cannot connect to Google Tasks", e, fatal=True)
-                raise LookupError from e
+    def _read_service(self, info):
+        """ Service for reading. In case of an error, informs user and raises LookupError. """
         try:
-            results = service.tasks().list(maxResults=99,
-                                           tasklist=self.tasklist,
-                                           showCompleted=show_completed,
-                                           dueMin=due_min,
-                                           dueMax=self.get_time(add_days=1, mode="midnight")  # for format see #17
-                                           ).execute()
-        except (LookupError, httplib2.ServerNotFoundError, Error) as e:
-            # self.tasklist property has problem, raises LookupError
+            return self.calendar_api.get_service(info=info)
+        except Exception as e:  # OAuth flow, missing/invalid client secret, network...
+            self.error("Cannot connect to Google Tasks", e, fatal=True)
+            raise LookupError from e
+
+    def _read_task_list(self, due_min, show_completed=False, service=None, list_id=DEFAULT_LIST):
+        """ All the tasks of the list due since `due_min`, page by page (the server returns at most 100 at once).
+            In case of an error, informs user and raises LookupError. """
+        if not service:
+            service = self._read_service("Reading task list")
+        items = []
+        page_token = None
+        try:
+            while True:
+                results = service.tasks().list(maxResults=100,
+                                               tasklist=list_id,
+                                               showCompleted=show_completed,
+                                               dueMin=due_min,
+                                               dueMax=self.get_time(add_days=1, mode="midnight"),  # for format see #17
+                                               pageToken=page_token
+                                               ).execute()
+                items.extend(results.get('items', []))
+                page_token = results.get('nextPageToken')
+                if not page_token:
+                    return items
+        except (httplib2.ServerNotFoundError, Error) as e:
             self.error("Cannot read the task list", e)
             raise LookupError from e
-        items = results.get('items', [])
-        if not items:
-            self.info('No tasks found.')
+
+    def _read_chosen_lists(self, due_min, show_completed=False, service=None):
+        """ [(item, list_id, icon)] from all the chosen lists.
+            :return: (items, complete) - complete is False if some of the lists could not be read.
+            Raises LookupError if none could be read. """
+        if not service:
+            service = self._read_service("Reading task lists")
+        items = []
+        failures = 0
+        for title, icon in self.tasklists:
+            try:
+                list_id = self.list_id(title)
+                items.extend((item, list_id, icon)
+                             for item in self._read_task_list(due_min, show_completed, service, list_id))
+            except LookupError as e:
+                if e.args:  # list_id() failure, the others are reported already
+                    self.error("Cannot read the task list", e)
+                failures += 1
+        if failures == len(self.tasklists):
             raise LookupError
-        return items
+        return items, not failures
 
     @staticmethod
-    def get_task_text(task, include_due=False):
+    def get_task_text(task, include_due=False, list_id=None, icon=TASK_ANCHOR_SYMBOL):
         """ formats task object to zim markup
         :type task: dict, ex: {'id': '...', 'etag': '"..."', 'title': '...',
                                'updated': '2019-07-25T10:11:12.000Z',
                                'status': 'needsAction', 'due': '2018-12-14T00:00:00.000Z'
                                }
         :param include_due: If True, small start date string is included.
+        :param list_id: The task list, written to the link so that we know where the task lives.
+        :param icon: The link label, distinguishing the task lists on the page.
         """
         s = "[*] " if task.get("completed") else "[ ] "
         if task.get("id", ""):
-            s += "[[gtasks://{}|{}]] ".format(task["id"], TASK_ANCHOR_SYMBOL)
+            s += "[[gtasks://{}{}|{}]] ".format(f"{list_id}/" if list_id else "", task["id"], icon)
         if "title" not in task:
             logger.error("Task text is missing")
             return False
@@ -821,16 +1005,20 @@ class GoogletasksController:
 
     @classmethod
     def get_task_id(cls, line_i, buffer):
-        task_anchor_pos = cls.readline(line_i, buffer).find(TASK_ANCHOR_SYMBOL)
-        if task_anchor_pos > -1:
-            offset = task_anchor_pos + buffer.get_iter_at_line(line_i).get_offset()
+        """ (list_id, task_id) of the gtasks:// link on the line, (None, None) if there is none.
+            list_id is None for the links written before multiple lists were supported. """
+        start = buffer.get_iter_at_line(line_i)
+        # the icon is only the link label (and differs per list), the link itself is what we look for
+        for offset in range(start.get_offset(), start.get_offset() + len(cls.readline(line_i, buffer))):
             # noinspection PyBroadException
             try:
-                link_data = buffer.get_link_data(buffer.get_iter_at_offset(offset))
-                return link_data["href"].split("gtasks://")[1]
+                href = (buffer.get_link_data(buffer.get_iter_at_offset(offset)) or {}).get("href") or ""
             except Exception:
-                pass
-        return None
+                continue
+            if href.startswith("gtasks://"):
+                list_id, _sep, task_id = href[len("gtasks://"):].rpartition("/")
+                return list_id or None, task_id
+        return None, None
 
     def read_task_from_selection(self, buffer=None):
         if not buffer:
@@ -840,8 +1028,9 @@ class GoogletasksController:
         lines = get_dumper("wiki").dump(buffer.get_parsetree(buffer.get_selection_bounds()))
         match = taskAnchorTreeRe.match("".join(lines))
         if match:
-            task = {"id": match.group(2),
-                    "title": match.group(3).split("\n", 1)[0],
+            task = {"id": match.group(3),
+                    "_list_id": match.group(2),
+                    "title": match.group(5).split("\n", 1)[0],
                     "status": "completed" if (match.group(1) or "").startswith("[*]") else "needsAction"
                     }
         else:
@@ -898,13 +1087,17 @@ class GoogletasksController:
 
         # Do internal fetching of new tasks text
         try:
-            items = self._read_task_list(due_min)
+            items, complete = self._read_chosen_lists(due_min)
         except LookupError:
+            return
+        if not items:
+            self.info('No tasks found.')
             return
 
         texts = []
+        icons = []
         items_ids = set()
-        for item in items:
+        for item, list_id, icon in items:
             # We remember the task ID, not the etag. The etag is a version fingerprint that changes
             # whenever *anything* about the task changes - title, due date, even its position in the
             # list - so an already imported task that got touched on the server looked brand new and
@@ -921,20 +1114,27 @@ class GoogletasksController:
                 continue
             logger.info("Appending {}.".format(item.get("title")))
             logger.debug(item)
-            text = self.get_task_text(item, self.preferences["include_start_date"])
+            text = self.get_task_text(item, self.preferences["include_start_date"], list_id, icon)
             if text:
                 texts.append(text)
+                icons.append(icon)
             else:
                 self.error(f"Task {item['id']} has no title, skipped")
+        if not complete:
+            # The IDs of the list(s) that failed are not in this response, keep them so that their tasks
+            # are not imported again. And do not move the time on, the next import has to read them again.
+            items_ids |= self.cache.items_ids
         self.cache.items_ids = items_ids
+        save = self.cache.touch_save if complete else self.cache.save
 
         # Refreshes page from current configuration
         page = self._get_page()
-        s = " from list " + self.preferences['tasklist'] if self.preferences['tasklist'] else ""
-        self.info(f"New tasks{s}: {len(texts)}, page: {page.get_title()}")
+        per_list = ", ".join(f"{icon} {icons.count(icon)}" for icon in dict.fromkeys(icons))
+        self.info(f"New tasks: {len(texts)}{f' ({per_list})' if len(self.tasklists) > 1 and texts else ''},"
+                  f" page: {page.get_title()}")
         if not texts:
             if cache_exists:
-                self.cache.touch_save()
+                save()
             return
         text = "\n".join(texts) + "\n"
 
@@ -944,7 +1144,7 @@ class GoogletasksController:
         self._store_to_page(contents, page)
 
         # Save the list of successfully imported task
-        self.cache.touch_save()
+        save()
         # with open(CACHE_FILE, "wb") as f:
         #     pickle.dump(self.item_ids, f)
 
@@ -980,12 +1180,11 @@ class GoogletasksController:
         # XX maybe we may check the number of tasks to be fetched one-by-one after that and if it is still big,
         # perform more batch operation like this if there is a performance issue
         try:
-            cache = {task["id"]: task["status"] == "completed" for task in
-                     self._read_task_list(self.get_time(add_days=-14, mode="midnight"),
-                                          show_completed=True,
-                                          service=service)}
+            items, _complete = self._read_chosen_lists(self.get_time(add_days=-14, mode="midnight"),
+                                                       show_completed=True, service=service)
         except LookupError:
             return False
+        cache = {task["id"]: task["status"] == "completed" for task, _list_id, _icon in items}
 
         allow_single_search = True
         unidentified_tasks = []
@@ -994,14 +1193,15 @@ class GoogletasksController:
         for line in page.dump("wiki"):
             match = taskAnchorTreeRe.match(line)
             if match:
-                task_id = match[2]
-                task_text = match[3]
+                list_id = match[2]
+                task_id = match[3]
+                task_text = match[5]
                 completed = cache.get(task_id, None)
 
                 # perform single search if needed, this task was not fetched within the cache
                 if completed is None and allow_single_search:
                     try:
-                        task = service.tasks().get(task=task_id, tasklist=self.tasklist).execute()
+                        task = service.tasks().get(task=task_id, tasklist=list_id or self.primary_list_id).execute()
                     except Error as e:
                         logger.warning("Task %s not found on the server: %s", task_id, e)
                         unidentified_tasks.append(task_text)
@@ -1027,19 +1227,22 @@ class GoogletasksController:
         service = self.calendar_api.get_service(info="Refreshing task lists")
         try:
             results = service.tasklists().list().execute()
+            default_id = service.tasklists().get(tasklist=DEFAULT_LIST).execute()["id"]
         except (httplib2.ServerNotFoundError, Error) as e:
             self.error("Cannot refresh task lists", e)
             return False
         items = results.get('items', [])
         if not items:
             self.info('No task lists found.')
-            return
+            return False
 
         self.cache.lists.clear()
-        for tasklist in items:
+        # the default list first, chosen_lists() relies on that to put a title to '@default'
+        for tasklist in sorted(items, key=lambda tl: tl["id"] != default_id):
             self.cache.lists[tasklist["title"]] = tasklist["id"]
-        self.info(f'{len(items)} task lists discovered you can change to in the menu.')
+        self.info(f'{len(items)} task lists discovered you can choose in the menu.')
         self.cache.save()
+        return True
 
 
 class Cache:
