@@ -426,7 +426,8 @@ class GoogletasksWindow(MainWindowExtension):
         self._list_actions = []
         self._menu_tasklist = self.controller.preferences["tasklist"]
 
-        icons = self.controller.chosen_lists()
+        chosen = self.controller.chosen_lists()
+        icons = self.controller.remember_icons()
         items = []
         for title in self.controller.cache.lists:
             # Apostrophe suppressed; I was not able to reliably slash it, getting a strange error:
@@ -435,7 +436,7 @@ class GoogletasksWindow(MainWindowExtension):
             el = "change_list_{}".format(title.replace(r"'", r""))
             # menu labels are mnemonic, a single underscore in the title would vanish
             gtk_action = Gtk.ToggleAction(name=el, label=f"{icons.get(title, '   ')} {title.replace('_', '__')}")
-            gtk_action.set_active(title in icons)
+            gtk_action.set_active(title in chosen)
             gtk_action.connect("toggled", self._list_toggled, title)
             action_group.add_action(gtk_action)
             self._list_actions.append(gtk_action)
@@ -777,12 +778,23 @@ class GoogletasksController:
         default_title = next(iter(self.cache.lists), DEFAULT_LIST)
         return {(default_title if title == DEFAULT_LIST else title): icon for title, icon in self.tasklists}
 
+    def remember_icons(self):
+        """ Store the icons of the chosen lists, so that a list unchosen and chosen again gets its icon back
+            (the icon is part of the links already on the pages). Returns {title: icon} of all lists ever seen. """
+        icons = self.cache.load().icons
+        if not icons.items() >= self.chosen_lists().items():
+            icons.update(self.chosen_lists())
+            self.cache.save()
+        return icons
+
     def toggle_list(self, title, active):
         """ Add the list to the imported ones or remove it from them, keeping the icons already given
             (written explicitly, so that the remaining lists do not swap their icons). """
+        remembered = self.remember_icons()
         lists = self.chosen_lists()
         if active and title not in lists:
-            lists[title] = ""
+            icon = remembered.get(title, "")
+            lists[title] = "" if icon in lists.values() else icon  # taken by another list meanwhile
             lists = dict(parse_tasklists(format_tasklists(lists.items())))
         elif not active and title in lists:
             if len(lists) == 1:
@@ -1256,6 +1268,8 @@ class Cache:
             If user changes to another taks list, imports and changes back, items_ids are lost. """
         self.lists = {}
         "{title: id}"
+        self.icons = {}
+        "{title: icon} of every list ever chosen, kept when the list is unchosen"
         self.last_fetched = 0
         "get initial datetime"
 
@@ -1279,7 +1293,7 @@ class Cache:
             except (OSError, ValueError) as e:  # ValueError: json errors, bad encoding
                 logger.warning("Cannot read cache %s, starting with an empty one: %s", self._path, e)
                 data, migrated = None, False
-            data = data or {"items_ids": set(), "lists": {}, "last_fetched": 0}
+            data = data or {"items_ids": set(), "lists": {}, "icons": {}, "last_fetched": 0}
             self.__dict__.update(data)
             self._mtime = mtime
             if migrated:
@@ -1290,7 +1304,7 @@ class Cache:
     def parse(text):
         """ Cache file content -> ({items_ids, lists, last_fetched}, migrated) or (None, False) if unusable.
 
-        Current format: {"version": 1, "items_ids": [...], "lists": {...}, "last_fetched": float}.
+        Current format: {"version": 1, "items_ids": [...], "lists": {...}, "icons": {...}, "last_fetched": float}.
         Old format (no "version") was written by jsonpickle: plain JSON as well, only the set of IDs
         is wrapped as {"py/set": [...]}, and the timestamp may be called `date_at` in even older files.
         We read it as plain JSON so that already imported tasks are not imported again and
@@ -1309,18 +1323,23 @@ class Cache:
         if isinstance(ids, dict):  # jsonpickle set
             ids = ids.get("py/set", [])
         lists = raw.get("lists", {})
+        icons = raw.get("icons", {})
+        if not isinstance(icons, dict):
+            icons = {}
         last_fetched = raw.get("last_fetched", raw.get("date_at", 0))
         if not isinstance(ids, list) or not isinstance(lists, dict) or \
                 not isinstance(last_fetched, (int, float)) or isinstance(last_fetched, bool):
             return None, False
         return {"items_ids": {i for i in ids if isinstance(i, str)},
                 "lists": {k: v for k, v in lists.items() if isinstance(k, str) and isinstance(v, str)},
+                "icons": {k: v for k, v in icons.items() if isinstance(k, str) and isinstance(v, str)},
                 "last_fetched": last_fetched}, migrated
 
     def save(self):
         data = {"version": CACHE_SCHEMA_VERSION,
                 "items_ids": sorted(self.items_ids),
                 "lists": self.lists,
+                "icons": self.icons,
                 "last_fetched": self.last_fetched}
         tmp = self._path.with_name(self._path.name + ".tmp")
         tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")

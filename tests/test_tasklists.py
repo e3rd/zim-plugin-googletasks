@@ -33,7 +33,8 @@ def make_controller(gt, pref, lists):
     controller = object.__new__(gt.GoogletasksController)
     controller.window = None
     controller.preferences = {"tasklist": pref}
-    controller.cache = type("C", (), {"lists": dict(lists)})()
+    controller.cache = type("C", (), {"lists": dict(lists), "icons": {}, "load": lambda self: self,
+                                      "save": lambda self: None})()
     controller.failed = False
     return controller
 
@@ -51,6 +52,17 @@ def test_toggle_list_adds_and_removes_keeping_icons(gt):
     c.toggle_list("Home", True)
     c.toggle_list("Work", False)
     assert c.preferences["tasklist"] == "My Tasks=✋, Home=🏠"  # Home does not take over Work's icon
+
+
+def test_toggle_list_brings_the_icon_back(gt):
+    c = make_controller(gt, "My Tasks, Work=🔧", {"My Tasks": "D", "Work": "W", "Home": "H"})
+    c.toggle_list("Work", False)
+    c.toggle_list("Work", True)
+    assert c.preferences["tasklist"] == "My Tasks=✋, Work=🔧"
+    c.toggle_list("Work", False)
+    c.preferences["tasklist"] = "My Tasks=✋, Home=🔧"  # edited in the Properties meanwhile
+    c.toggle_list("Work", True)
+    assert c.preferences["tasklist"] == "My Tasks=✋, Home=🔧, Work=💼"  # the remembered icon is taken
 
 
 def test_toggle_list_keeps_the_last_one(gt):
