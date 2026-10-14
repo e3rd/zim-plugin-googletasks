@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    branches: ['**']  # tags run the suite through release.yml, which waits for it
   pull_request:
+  workflow_call:
 
 jobs:
   test:
