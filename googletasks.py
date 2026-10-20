@@ -22,7 +22,7 @@ from googleapiclient.errors import Error
 from oauth2client import client, tools
 from oauth2client.file import Storage
 from zim.actions import action, get_gtk_actiongroup, ActionClassMethod
-from zim.config import XDG_CONFIG_HOME, XDG_DATA_HOME, ConfigManager
+from zim.config import XDG_CONFIG_HOME, XDG_DATA_HOME
 from zim.formats import get_dumper
 from zim.formats.wiki import Parser
 
@@ -227,7 +227,9 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
     def run(self):
         ntb_name = self.get_notebook_argument()[0] or self.get_default_or_only_notebook()
         ntb, _ = build_notebook(ntb_name)
-        preferences = ConfigManager().get_config_dict('preferences.conf')['GoogletasksPlugin'].dump()
+        # the notebook properties, as the GUI uses them; preferences.conf holds only their defaults
+        # (reading it imported just the default task list, not the ones chosen for the notebook)
+        preferences = GoogletasksPlugin().notebook_properties(ntb)
         controller = GoogletasksController(notebook=ntb, preferences=preferences)
         controller.fetch(True)  # add new lines
         if controller.failed:

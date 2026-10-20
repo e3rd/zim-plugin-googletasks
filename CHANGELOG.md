@@ -1,3 +1,6 @@
+# Unreleased
+* fix: the nightly `zim --plugin googletasks` imported only the default task list, ignoring the lists chosen in the notebook properties
+
 # 1.2 (2026-10-14)
 * new: import from multiple task lists at once, each with its own icon (`Task lists` property / check items in `Tools / Google Tasks / Task lists`); the task dialog chooses (or moves to) the list; a list unchecked and checked again gets its icon back
 * enh: Alt+L in the task dialog pops up the choice of the task list
