@@ -8,6 +8,7 @@ class FakeCache:
 
     def __init__(self, items_ids=(), exists=True):
         self.items_ids = set(items_ids)
+        self.undated_ids = set()
         self._exists = exists
         self.saved = 0
         self.last_fetched = datetime.datetime.now().timestamp() - 86400
@@ -56,20 +57,31 @@ class FakeNotebook:
 
 
 class FakeService:
-    """ tasks().list(...).execute() serving `pages[list_id]` one by one, linked with nextPageToken. """
+    """ tasks().list(...).execute() serving `pages[list_id]` one by one, linked with nextPageToken.
+        A call without the due date filter (undated tasks wanted) is served from `undated[list_id]`
+        (whole list: dated tasks too, the controller must pick the undated ones itself). """
 
-    def __init__(self, pages):
+    def __init__(self, pages, undated=None):
         self.pages = pages
+        self.undated = undated or {}
         self.calls = []
+        self.undated_calls = []
+        self.kwargs = []
 
     def tasks(self):
         return self
 
     def list(self, tasklist, pageToken=None, **kwargs):
-        self.calls.append((tasklist, pageToken))
-        if tasklist not in self.pages:
+        self.kwargs.append(kwargs)
+        if "dueMax" in kwargs:
+            self.calls.append((tasklist, pageToken))
+            source = self.pages
+        else:
+            self.undated_calls.append((tasklist, pageToken))
+            source = self.undated
+        if tasklist not in source:
             raise self.error("no such list")
-        pages = self.pages[tasklist]
+        pages = source[tasklist]
         i = int(pageToken or 0)
         result = {"items": pages[i]} if pages else {}
         if i + 1 < len(pages):
@@ -78,23 +90,33 @@ class FakeService:
 
 
 def make_controller(gt, monkeypatch, items, cache, page_lines=("Home\n", "\n", "existing\n"),
-                    tasklist="", pages=None, lists=None):
-    """ :param items: tasks of the default list (single page), unless `pages` {list_id: [[items]]} given """
+                    tasklist="", pages=None, lists=None, undated=None):
+    """ :param items: tasks of the default list (single page), unless `pages` {list_id: [[items]]} given
+        :param undated: {list_id: [[items]]} served when reading without the due date filter;
+                        if given, `include_undated` is on """
     controller = object.__new__(gt.GoogletasksController)
     controller.window = None
-    controller.preferences = {"include_start_date": False, "tasklist": tasklist, "page": ""}
+    controller.preferences = {"include_start_date": False, "tasklist": tasklist, "page": "",
+                              "include_undated": undated is not None, "include_assigned": True}
     controller.cache = cache
     cache.lists = lists or {}
     controller.failed = False
     controller.notebook = FakeNotebook(FakePage(list(page_lines)))
-    controller.service = FakeService(pages if pages is not None else {"@default": [items]})
+    controller.service = FakeService(pages if pages is not None else {"@default": [items]}, undated)
     controller.service.error = gt.Error
     monkeypatch.setattr(controller, "_read_service", lambda info: controller.service)
     return controller
 
 
-def item(task_id, title="t", etag=None):
-    return {"id": task_id, "etag": etag or f'"etag-{task_id}"', "title": title}
+DUE = "2026-10-23T00:00:00.000Z"
+
+
+def item(task_id, title="t", etag=None, due=DUE):
+    """ :param due: None for a task without a due date """
+    task = {"id": task_id, "etag": etag or f'"etag-{task_id}"', "title": title}
+    if due:
+        task["due"] = due
+    return task
 
 
 def test_imports_new_tasks_after_first_blank_line(gt, monkeypatch):
@@ -232,3 +254,56 @@ def test_untitled_task_is_skipped_and_reported(gt, monkeypatch, capsys, include_
     assert "False" not in c.notebook.page.parsed
     assert c.failed
     assert "no title" in capsys.readouterr().err
+
+
+def test_assigned_tasks_are_asked_for(gt, monkeypatch):
+    c = make_controller(gt, monkeypatch, [item("a", "Alpha")], FakeCache())
+    c.fetch(force=True)
+    assert all(kw["showAssigned"] is True for kw in c.service.kwargs)
+    c.preferences["include_assigned"] = False
+    c.fetch(force=True)
+    assert c.service.kwargs[-1]["showAssigned"] is False
+
+
+def test_undated_tasks_are_imported_once(gt, monkeypatch):
+    cache = FakeCache()
+    c = make_controller(gt, monkeypatch, [item("a", "Alpha")], cache,
+                        undated={"@default": [[item("a", "Alpha"), item("u", "Undated", due=None)]]})
+    c.fetch(force=True)
+    assert c.notebook.page.parsed == "Home\n\n[ ] [[gtasks://@default/a|✋]] Alpha\n" \
+                                     "[ ] [[gtasks://@default/u|✋]] Undated\nexisting\n"
+    assert c.service.undated_calls == [("@default", None)]
+    assert cache.items_ids == {"a"} and cache.undated_ids == {"u"}
+    c.notebook.page.parsed = None
+    c.fetch(force=True)
+    assert c.notebook.page.parsed is None
+
+
+def test_undated_task_getting_a_future_date_is_not_reimported(gt, monkeypatch):
+    """ It vanishes from both responses for a while, then shows up when it falls due. """
+    cache = FakeCache()
+    c = make_controller(gt, monkeypatch, None, cache,
+                        pages={"@default": [[]]}, undated={"@default": [[item("u", "Undated", due=None)]]})
+    c.fetch(force=True)
+    c.service.undated["@default"] = [[item("u", "Undated", due="2026-12-24T00:00:00.000Z")]]
+    c.notebook.page.parsed = None
+    c.fetch(force=True)  # no task anywhere
+    c.service.pages["@default"] = [[item("u", "Undated", due="2026-12-24T00:00:00.000Z")]]
+    c.fetch(force=True)  # it is due now
+    assert c.notebook.page.parsed is None
+    assert cache.items_ids == {"u"} and cache.undated_ids == set()
+
+
+def test_undated_tasks_not_read_when_disabled(gt, monkeypatch):
+    c = make_controller(gt, monkeypatch, [item("a", "Alpha")], FakeCache())
+    c.fetch(force=True)
+    assert c.service.undated_calls == []
+
+
+def test_all_history_reimports_undated_too(gt, monkeypatch):
+    cache = FakeCache()
+    c = make_controller(gt, monkeypatch, [], cache, undated={"@default": [[item("u", "Undated", due=None)]]})
+    cache.undated_ids = {"u"}
+    c.fetch(all_history=True)
+    assert "Undated" in c.notebook.page.parsed
+

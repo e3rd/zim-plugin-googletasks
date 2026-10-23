@@ -3,6 +3,8 @@
 #
 from __future__ import annotations, print_function
 
+import base64
+import binascii
 import datetime
 import json
 import logging
@@ -12,6 +14,7 @@ import sys
 from pathlib import Path
 from time import time
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import dateutil.parser
 import httplib2
@@ -87,9 +90,56 @@ TASK_ANCHOR_SYMBOL = u"\u270b"
 LIST_ICONS = (TASK_ANCHOR_SYMBOL, "💼", "🏠", "🛒", "📚", "⭐", "🔧", "🎯")
 "icons given in turn to the task lists that have no icon of their own in the preferences"
 DEFAULT_LIST = "@default"
-taskAnchorTreeRe = re.compile(r'(\[.\]\s)?\[\[gtasks://(?:([^/|\]]*)/)?([^/|\]]*)\|([^\]]*)\]\]\s?(.*)')
-""" A task line: 1 checkbox, 2 list ID (missing in links written before multiple lists were supported),
-    3 task ID, 4 icon, 5 task text. Ex: `[ ] [[gtasks://<list_id>/<task_id>|💼]] Task title` """
+TASK_URL = "https://tasks.google.com/task/"
+taskAnchorTreeRe = re.compile(r'(\[.\]\s)?\[\[((?:gtasks://|' + re.escape(TASK_URL) + r')[^|\]]*)\|([^\]]*)\]\]\s?(.*)')
+""" A task line: 1 checkbox, 2 href of the task anchor (see task_href), 3 icon, 4 task text.
+    Ex: `[ ] [[https://tasks.google.com/task/<web_id>?list=<list_id>|💼]] Task title` """
+
+
+def task_href(task_id, list_id=None, web_link=None):
+    """ The href of the task anchor: the task's page in Google Tasks, so that clicking the anchor opens it.
+
+    The task ID of the API is the URL-safe base64 (without padding) of the ID in the web link
+    (`webViewLink`: https://tasks.google.com/task/<web_id>?sa=6), so the link keeps it, and the list ID
+    goes to the `list` parameter. If the web ID cannot be had (it is computed when the task comes
+    without `webViewLink`), the original `gtasks://<list_id>/<task_id>` is written instead.
+    """
+    if web_link and "/task/" in web_link:
+        web_id = web_link.split("/task/", 1)[1].split("?", 1)[0].split("#", 1)[0]
+    else:
+        try:
+            web_id = base64.urlsafe_b64decode(task_id + "=" * (-len(task_id) % 4)).decode()
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            web_id = None
+    if web_id and _api_task_id(web_id) == task_id:
+        return TASK_URL + quote(web_id, safe=":") + (f"?{urlencode({'list': list_id})}" if list_id else "")
+    return "gtasks://{}{}".format(f"{list_id}/" if list_id else "", task_id)
+
+
+def parse_task_href(href):
+    """ (list_id, task_id) of a task anchor href, None if it is not one. See task_href.
+        list_id is None for the links written before multiple lists were supported. """
+    if href.startswith("gtasks://"):
+        list_id, _sep, task_id = href[len("gtasks://"):].rpartition("/")
+        return list_id or None, task_id
+    if href.startswith(TASK_URL):
+        url = urlsplit(href)
+        web_id = url.path.rsplit("/task/", 1)[1]
+        return parse_qs(url.query).get("list", [None])[0], _api_task_id(web_id)
+    return None
+
+
+def _api_task_id(web_id):
+    return base64.urlsafe_b64encode(web_id.encode()).decode().rstrip("=")
+SOURCE_ICONS = {"DOCUMENT": "📄", "SPACE": "💬", "email": "📧", "keep_note": "📝"}
+""" Labels of the links to where a task comes from: a Google Doc or a Chat space it was assigned from
+    (assignmentInfo.surfaceType), an e-mail or a Keep note it was created from (links[].type).
+    🔗 for an unknown one. """
+SOURCE_ARROW = "↗"
+""" Follows the icon in the link label. Zim opens a link on Enter only with the caret inside its label,
+    which a one-character label has no room for (the caret is either before or after it). """
+sourceLinkRe = re.compile(r'\[\[(https?://[^|\]]+)\|(📄|💬|📧|📝|🔗)' + SOURCE_ARROW + r'?\]\]\s*')
+""" A link to where the task comes from, see SOURCE_ICONS: 1 URL, 2 icon. """
 start_date_in_title = re.compile(r'(.*)>(\d{4}-\d{2}(-\d{2})?)(.*)')  # (_\{//)?  (//})?
 INVALID_DAY = "N/A"
 
@@ -146,6 +196,9 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
                                     '\nIncludes today\'s or since last time due date tasks'), True),
         ('auto_sync', 'bool', _('Sync tasks status before import'
                                 '\nMay take a long time, notably if tasks on the page are older than 14 days.'), False),
+        ('include_undated', 'bool', _('Import tasks without a due date'
+                                      '\nEach one only once, when it first appears.'), True),
+        ('include_assigned', 'bool', _('Import tasks assigned to me from Google Docs or Chat'), True),
         ('include_start_date', 'bool', _('Include start date'
                                          '\nStandard Zim notation, ex: ">2021-01-01" means you want'
                                          ' the task to appear not sooner than in January.'), False),
@@ -951,11 +1004,16 @@ class GoogletasksController:
             self.error("Cannot connect to Google Tasks", e, fatal=True)
             raise LookupError from e
 
-    def _read_task_list(self, due_min, show_completed=False, service=None, list_id=DEFAULT_LIST):
+    def _read_task_list(self, due_min, show_completed=False, service=None, list_id=DEFAULT_LIST, undated=False):
         """ All the tasks of the list due since `due_min`, page by page (the server returns at most 100 at once).
+            :param undated: Instead, all the tasks that have no due date. The server never returns them when
+                            filtering by the due date, so we read the list without the filter and pick them.
+            Tasks assigned to the user from Google Docs or Chat are returned only if `include_assigned` is set.
             In case of an error, informs user and raises LookupError. """
         if not service:
             service = self._read_service("Reading task list")
+        due = {} if undated else {"dueMin": due_min,
+                                  "dueMax": self.get_time(add_days=1, mode="midnight")}  # for format see #17
         items = []
         page_token = None
         try:
@@ -963,20 +1021,21 @@ class GoogletasksController:
                 results = service.tasks().list(maxResults=100,
                                                tasklist=list_id,
                                                showCompleted=show_completed,
-                                               dueMin=due_min,
-                                               dueMax=self.get_time(add_days=1, mode="midnight"),  # for format see #17
-                                               pageToken=page_token
+                                               showAssigned=self.preferences["include_assigned"],
+                                               pageToken=page_token,
+                                               **due
                                                ).execute()
                 items.extend(results.get('items', []))
                 page_token = results.get('nextPageToken')
                 if not page_token:
-                    return items
+                    return [item for item in items if not item.get("due")] if undated else items
         except (httplib2.ServerNotFoundError, Error) as e:
             self.error("Cannot read the task list", e)
             raise LookupError from e
 
-    def _read_chosen_lists(self, due_min, show_completed=False, service=None):
+    def _read_chosen_lists(self, due_min, show_completed=False, service=None, undated=False):
         """ [(item, list_id, icon)] from all the chosen lists.
+            :param undated: Add the tasks that have no due date as well.
             :return: (items, complete) - complete is False if some of the lists could not be read.
             Raises LookupError if none could be read. """
         if not service:
@@ -988,6 +1047,9 @@ class GoogletasksController:
                 list_id = self.list_id(title)
                 items.extend((item, list_id, icon)
                              for item in self._read_task_list(due_min, show_completed, service, list_id))
+                if undated:
+                    items.extend((item, list_id, icon)
+                                 for item in self._read_task_list(due_min, show_completed, service, list_id, True))
             except LookupError as e:
                 if e.args:  # list_id() failure, the others are reported already
                     self.error("Cannot read the task list", e)
@@ -1006,13 +1068,23 @@ class GoogletasksController:
         :param include_due: If True, small start date string is included.
         :param list_id: The task list, written to the link so that we know where the task lives.
         :param icon: The link label, distinguishing the task lists on the page.
+
+        A task assigned from Google Docs or Chat or created from an e-mail or a Keep note gets a link there before
+        its title, so that it is clear what it belongs to (its title is often just the comment text or the subject).
+        Read back by read_task_from_selection.
         """
         s = "[*] " if task.get("completed") else "[ ] "
+        # the icons go together, a single space separates them from the title
+        meta = ""
         if task.get("id", ""):
-            s += "[[gtasks://{}{}|{}]] ".format(f"{list_id}/" if list_id else "", task["id"], icon)
+            meta += f"[[{task_href(task['id'], list_id, task.get('webViewLink'))}|{icon}]]"
         if "title" not in task:
             logger.error("Task text is missing")
             return False
+        for url, source_icon in task.get("_source_links") or GoogletasksController.source_links(task):
+            meta += f"[[{url}|{source_icon}{SOURCE_ARROW}]]"
+        if meta:
+            s += meta + " "
         # we dont want to have the task started with: "[ ] [ ] "
         s += task['title'][4:] if task['title'].startswith("[ ] ") else task['title']
         if include_due and task.get("due"):
@@ -1021,6 +1093,17 @@ class GoogletasksController:
         if task.get("notes", ""):  # insert other lines
             s += "\n" + task['notes']
         return s
+
+    @staticmethod
+    def source_links(task):
+        """ [(URL, icon)] of where the task comes from, see SOURCE_ICONS. """
+        links = []
+        info = task.get("assignmentInfo") or {}
+        if info.get("linkToTask"):
+            links.append((info["linkToTask"], SOURCE_ICONS.get(info.get("surfaceType"), "🔗")))
+        links.extend((link["link"], SOURCE_ICONS.get(link.get("type"), "🔗"))
+                     for link in task.get("links") or () if link.get("link"))
+        return links
 
     @classmethod
     def readline(cls, line_i, buffer):
@@ -1035,7 +1118,7 @@ class GoogletasksController:
 
     @classmethod
     def get_task_id(cls, line_i, buffer):
-        """ (list_id, task_id) of the gtasks:// link on the line, (None, None) if there is none.
+        """ (list_id, task_id) of the task anchor on the line, (None, None) if there is none.
             list_id is None for the links written before multiple lists were supported. """
         start = buffer.get_iter_at_line(line_i)
         # the icon is only the link label (and differs per list), the link itself is what we look for
@@ -1045,9 +1128,9 @@ class GoogletasksController:
                 href = (buffer.get_link_data(buffer.get_iter_at_offset(offset)) or {}).get("href") or ""
             except Exception:
                 continue
-            if href.startswith("gtasks://"):
-                list_id, _sep, task_id = href[len("gtasks://"):].rpartition("/")
-                return list_id or None, task_id
+            parsed = parse_task_href(href)
+            if parsed:
+                return parsed
         return None, None
 
     def read_task_from_selection(self, buffer=None):
@@ -1058,9 +1141,10 @@ class GoogletasksController:
         lines = get_dumper("wiki").dump(buffer.get_parsetree(buffer.get_selection_bounds()))
         match = taskAnchorTreeRe.match("".join(lines))
         if match:
-            task = {"id": match.group(3),
-                    "_list_id": match.group(2),
-                    "title": match.group(5).split("\n", 1)[0],
+            list_id, task_id = parse_task_href(match.group(2))
+            task = {"id": task_id,
+                    "_list_id": list_id,
+                    "title": match.group(4).split("\n", 1)[0],
                     "status": "completed" if (match.group(1) or "").startswith("[*]") else "needsAction"
                     }
         else:
@@ -1074,6 +1158,9 @@ class GoogletasksController:
                 # ex: 'test 13 _{//>2020-06-03//}' (start date in 'small' markup)
                 task["due"] = m[2]  # → "2020-06-03"
                 task["title"] = (m[1] + m[4]).replace("_{////}", "").rstrip()  # → "test 13"
+        # keep the links out of the title on the server, but put them back to the page if the dialog is cancelled
+        task["_source_links"] = [(m[1], m[2]) for m in sourceLinkRe.finditer(task["title"])]
+        task["title"] = sourceLinkRe.sub("", task["title"]).strip()
         task["notes"] = "".join(lines[1:])
 
         buffer.delete(*buffer.get_selection_bounds())  # cuts the task
@@ -1113,11 +1200,12 @@ class GoogletasksController:
 
         if all_history:  # all non-completed tasks
             self.cache.items_ids.clear()  # re-import everything
+            self.cache.undated_ids.clear()
             due_min = None
 
         # Do internal fetching of new tasks text
         try:
-            items, complete = self._read_chosen_lists(due_min)
+            items, complete = self._read_chosen_lists(due_min, undated=self.preferences["include_undated"])
         except LookupError:
             return
         if not items:
@@ -1127,18 +1215,20 @@ class GoogletasksController:
         texts = []
         icons = []
         items_ids = set()
+        undated_ids = set()
         for item, list_id, icon in items:
             # We remember the task ID, not the etag. The etag is a version fingerprint that changes
             # whenever *anything* about the task changes - title, due date, even its position in the
             # list - so an already imported task that got touched on the server looked brand new and
             # was imported a second time. (`or item["etag"]` only keeps caches written by older
             # versions of the plugin working; it may be dropped in some future release.)
-            already_imported = item["id"] in self.cache.items_ids or item["etag"] in self.cache.items_ids
+            already_imported = item["id"] in self.cache.items_ids or item["etag"] in self.cache.items_ids \
+                or item["id"] in self.cache.undated_ids
             # Remember *every* task the server returned, not just those due today or later. `due_min`
             # above reaches back to the midnight of the previous import, so past-due tasks are handed
             # to us again on the next run - forgetting them here is what re-imported yesterday's
             # tasks today. The set stays bounded anyway: it is rebuilt from one response each time.
-            items_ids.add(item["id"])
+            (items_ids if item.get("due") else undated_ids).add(item["id"])
             if already_imported:
                 logger.debug('Text already imported {}.'.format(item.get("title")))
                 continue
@@ -1154,6 +1244,11 @@ class GoogletasksController:
             # The IDs of the list(s) that failed are not in this response, keep them so that their tasks
             # are not imported again. And do not move the time on, the next import has to read them again.
             items_ids |= self.cache.items_ids
+            undated_ids |= self.cache.undated_ids
+        # A task without a date is remembered until it shows up dated. Had it got a date in the future, it would
+        # vanish from both the undated and the dated (only up to tomorrow) response, so we cannot rebuild the set
+        # from the response the way we do with items_ids - it would be imported a second time when it falls due.
+        self.cache.undated_ids = undated_ids | (self.cache.undated_ids - items_ids)
         self.cache.items_ids = items_ids
         save = self.cache.touch_save if complete else self.cache.save
 
@@ -1183,19 +1278,20 @@ class GoogletasksController:
 
         :param contents: [] lines of the page
         :param page: ZimPage
+
+        page.parse() refills the whole textbuffer, leaving the caret at the end of the page. If the page
+        is the one being displayed, we put the caret back onto its line (see restore_cursor_anchor).
+        (The names used to be compared by `is`, which is False for two equal strings that are
+        not the same object, so the caret was never restored and jumped to the end.)
         """
-        bounds = buffer = None
-        if self.window and self.window.pageview.page.name is page.name:
-            # HP is current page - we use GTK buffers, caret stays at position
-            buffer = self.window.pageview.textview.get_buffer()
-            bounds = [x.get_offset() for x in buffer.get_selection_bounds()]
-            if not bounds:
-                i = buffer.get_insert_iter()
-                bounds = [i.get_offset()] * 2
+        pageview = anchor = None
+        if self.window and self.window.pageview.page and self.window.pageview.page.name == page.name:
+            pageview = self.window.pageview
+            anchor = get_cursor_anchor(pageview)
         page.parse('wiki', "".join(contents))
         self.notebook.store_page(page)
-        if bounds:
-            buffer.select_range(buffer.get_iter_at_offset(bounds[0]), buffer.get_iter_at_offset(bounds[1]))
+        if anchor:
+            restore_cursor_anchor(pageview, anchor)
 
     def _get_page(self):
         return self.notebook.get_page(ZimPath(self.preferences["page"])) if self.preferences["page"] \
@@ -1223,9 +1319,8 @@ class GoogletasksController:
         for line in page.dump("wiki"):
             match = taskAnchorTreeRe.match(line)
             if match:
-                list_id = match[2]
-                task_id = match[3]
-                task_text = match[5]
+                list_id, task_id = parse_task_href(match[2])
+                task_text = match[4]
                 completed = cache.get(task_id, None)
 
                 # perform single search if needed, this task was not fetched within the cache
@@ -1284,6 +1379,8 @@ class Cache:
         self.items_ids = set()
         """ IDs of the tasks returned by the last import, so that they are not imported twice.
             If user changes to another taks list, imports and changes back, items_ids are lost. """
+        self.undated_ids = set()
+        "IDs of the imported tasks without a due date, kept until they get one (see fetch)"
         self.lists = {}
         "{title: id}"
         self.icons = {}
@@ -1311,7 +1408,7 @@ class Cache:
             except (OSError, ValueError) as e:  # ValueError: json errors, bad encoding
                 logger.warning("Cannot read cache %s, starting with an empty one: %s", self._path, e)
                 data, migrated = None, False
-            data = data or {"items_ids": set(), "lists": {}, "icons": {}, "last_fetched": 0}
+            data = data or {"items_ids": set(), "undated_ids": set(), "lists": {}, "icons": {}, "last_fetched": 0}
             self.__dict__.update(data)
             self._mtime = mtime
             if migrated:
@@ -1322,7 +1419,8 @@ class Cache:
     def parse(text):
         """ Cache file content -> ({items_ids, lists, last_fetched}, migrated) or (None, False) if unusable.
 
-        Current format: {"version": 1, "items_ids": [...], "lists": {...}, "icons": {...}, "last_fetched": float}.
+        Current format: {"version": 1, "items_ids": [...], "undated_ids": [...], "lists": {...}, "icons": {...},
+         "last_fetched": float}. (`undated_ids` and `icons` were added later, a file without them is fine.)
         Old format (no "version") was written by jsonpickle: plain JSON as well, only the set of IDs
         is wrapped as {"py/set": [...]}, and the timestamp may be called `date_at` in even older files.
         We read it as plain JSON so that already imported tasks are not imported again and
@@ -1344,11 +1442,15 @@ class Cache:
         icons = raw.get("icons", {})
         if not isinstance(icons, dict):
             icons = {}
+        undated = raw.get("undated_ids", [])
+        if not isinstance(undated, list):
+            undated = []
         last_fetched = raw.get("last_fetched", raw.get("date_at", 0))
         if not isinstance(ids, list) or not isinstance(lists, dict) or \
                 not isinstance(last_fetched, (int, float)) or isinstance(last_fetched, bool):
             return None, False
         return {"items_ids": {i for i in ids if isinstance(i, str)},
+                "undated_ids": {i for i in undated if isinstance(i, str)},
                 "lists": {k: v for k, v in lists.items() if isinstance(k, str) and isinstance(v, str)},
                 "icons": {k: v for k, v in icons.items() if isinstance(k, str) and isinstance(v, str)},
                 "last_fetched": last_fetched}, migrated
@@ -1356,6 +1458,7 @@ class Cache:
     def save(self):
         data = {"version": CACHE_SCHEMA_VERSION,
                 "items_ids": sorted(self.items_ids),
+                "undated_ids": sorted(self.undated_ids),
                 "lists": self.lists,
                 "icons": self.icons,
                 "last_fetched": self.last_fetched}

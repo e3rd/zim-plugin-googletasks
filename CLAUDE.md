@@ -40,9 +40,10 @@ Everything lives in [googletasks.py](googletasks.py), organized around a few cla
 
 Imported tasks are Zim checkbox lines with an embedded link back to the Google list and task ID, e.g.:
 ```
-[ ] [[gtasks://<list_id>/<task_id>|💼]] Task title
+[ ] [[https://tasks.google.com/task/<web_id>?list=<list_id>|💼]][[https://docs.google.com/…|📄↗]] Task title
 ```
-The link label is the icon of the list (`parse_tasklists`: the `tasklist` preference `My Tasks, Work=💼` → `[(title, icon)]`, missing icons filled from `LIST_ICONS`, ✋ = `TASK_ANCHOR_SYMBOL` first). `taskAnchorTreeRe` parses it back (groups: checkbox, list ID, task ID, icon, text); links written before multi-list support have no `<list_id>/` part and are treated as the primary (first chosen) list. `get_task_id` finds the link by its `gtasks://` href, not by the icon. Optional inline start-date markup (`_{//>2021-01-01//}`, parsed via `start_date_in_title`) records a "not before this date" hint the plugin also uses to prefill the date field in the new-task dialog.
+The anchor href is the task's page in Google Tasks (`task_href` / `parse_task_href`): the API task ID is the URL-safe base64 (no padding) of `<web_id>` (verified on thousands of real tasks), the list ID rides in `?list=`. Odd IDs that do not round-trip fall back to the older `gtasks://<list_id>/<task_id>` form, which is still parsed. Source links (`SOURCE_ICONS`, `sourceLinkRe`: 📄 doc, 💬 chat, 📧 e-mail, 📝 Keep, with a `↗` so the caret fits inside for Enter) follow the anchor without spaces; `read_task_from_selection` cuts them out of the title.
+The link label is the icon of the list (`parse_tasklists`: the `tasklist` preference `My Tasks, Work=💼` → `[(title, icon)]`, missing icons filled from `LIST_ICONS`, ✋ = `TASK_ANCHOR_SYMBOL` first). `taskAnchorTreeRe` parses it back (groups: checkbox, anchor href, icon, text; IDs via `parse_task_href`); links written before multi-list support have no list ID and are treated as the primary (first chosen) list. `get_task_id` finds the anchor by its href, not by the icon. Optional inline start-date markup (`_{//>2021-01-01//}`, parsed via `start_date_in_title`) records a "not before this date" hint the plugin also uses to prefill the date field in the new-task dialog.
 
 ### Key data flow
 

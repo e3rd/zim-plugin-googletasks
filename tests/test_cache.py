@@ -13,6 +13,7 @@ def test_roundtrip(gt, cache_path):
     cache.items_ids = {"b", "a"}
     cache.lists = {"Work": "id1"}
     cache.icons = {"Work": "💼"}
+    cache.undated_ids = {"u"}
     cache.touch_save()
     data = json.loads(cache_path.read_text())
     assert data["version"] == gt.CACHE_SCHEMA_VERSION
@@ -23,6 +24,7 @@ def test_roundtrip(gt, cache_path):
     assert loaded.lists == {"Work": "id1"}
     assert loaded.last_fetched == cache.last_fetched
     assert loaded.icons == {"Work": "💼"}
+    assert loaded.undated_ids == {"u"}
 
 
 def test_old_jsonpickle_format_is_migrated_and_resaved(gt, cache_path):
@@ -32,6 +34,7 @@ def test_old_jsonpickle_format_is_migrated_and_resaved(gt, cache_path):
     assert cache.items_ids == {"a", "b"}
     assert cache.lists == {"Work": "id1"}
     assert cache.last_fetched == 1234.5
+    assert cache.undated_ids == set()
     assert json.loads(cache_path.read_text())["version"] == gt.CACHE_SCHEMA_VERSION
     assert gt.Cache(cache_path).load().items_ids == {"a", "b"}  # second load reads the new format
 

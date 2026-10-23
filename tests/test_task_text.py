@@ -51,35 +51,35 @@ def test_anchor_regex_roundtrip(gt):
     line = gt.GoogletasksController.get_task_text(task).split("\n")[0]
     m = gt.taskAnchorTreeRe.match(line)
     assert m[1] == "[ ] "
-    assert m[2] is None
-    assert m[3] == task["id"]
-    assert m[5] == task["title"]
+    assert gt.parse_task_href(m[2]) == (None, task["id"])
+    assert m[4] == task["title"]
 
 
 def test_anchor_regex_completed_and_without_checkbox(gt):
     m = gt.taskAnchorTreeRe.match("[*] [[gtasks://a1|✋]] done")
-    assert (m[1], m[2], m[3], m[4], m[5]) == ("[*] ", None, "a1", "✋", "done")
-    m = gt.taskAnchorTreeRe.match("[[gtasks://a1|✋]] bare")
-    assert (m[1], m[3], m[5]) == (None, "a1", "bare")
+    assert (m[1], gt.parse_task_href(m[2]), m[3], m[4]) == ("[*] ", (None, "a1"), "✋", "done")
+    m = gt.taskAnchorTreeRe.match("[[https://tasks.google.com/task/IaMNd3-6tsOcoFVm|✋]] bare")
+    assert (m[1], gt.parse_task_href(m[2]), m[4]) == (None, (None, "SWFNTmQzLTZ0c09jb0ZWbQ"), "bare")
     assert gt.taskAnchorTreeRe.match("[ ] ordinary checkbox") is None
+    assert gt.taskAnchorTreeRe.match("[ ] [[https://example.com|✋]] other link") is None
 
 
 def test_get_task_text_with_list_and_icon(gt):
     text = gt.GoogletasksController.get_task_text({"id": "abc", "title": "Report"}, list_id="L1", icon="💼")
-    assert text == "[ ] [[gtasks://L1/abc|💼]] Report"
+    assert text == "[ ] [[gtasks://L1/abc|💼]] Report"  # "abc" is no real ID, no web link can be made of it
     m = gt.taskAnchorTreeRe.match(text)
-    assert (m[2], m[3], m[4], m[5]) == ("L1", "abc", "💼", "Report")
+    assert (gt.parse_task_href(m[2]), m[3], m[4]) == (("L1", "abc"), "💼", "Report")
 
 
 def test_anchor_regex_default_list(gt):
     m = gt.taskAnchorTreeRe.match("[ ] [[gtasks://@default/abc|✋]] x")
-    assert (m[2], m[3]) == ("@default", "abc")
+    assert gt.parse_task_href(m[2]) == ("@default", "abc")
 
 
 def test_start_date_in_title_roundtrip(gt):
     task = {"id": "1", "title": "test 13", "due": "2020-06-03T00:00:00.000Z"}
     line = gt.GoogletasksController.get_task_text(task, include_due=True)
-    title = gt.taskAnchorTreeRe.match(line)[5]
+    title = gt.taskAnchorTreeRe.match(line)[4]
     m = gt.start_date_in_title.match(title)
     assert m[2] == "2020-06-03"
     assert (m[1] + m[4]).replace("_{////}", "").rstrip() == "test 13"
@@ -141,3 +141,76 @@ def test_get_time_past_dates_false(get_time_fn):
 
 def test_get_time_unknown_mode_falls_back_to_isoformat(get_time_fn):
     assert get_time_fn(mode="bogus", from_string="2021-05-06T01:02:03") == "2021-05-06T01:02:03"
+
+
+@pytest.mark.parametrize("surface, icon", [("DOCUMENT", "📄"), ("SPACE", "💬"), ("OTHER", "🔗")])
+def test_get_task_text_assigned_links_its_source(gt, surface, icon):
+    task = {"id": "abc", "title": "Fix the table", "due": "2021-01-01T00:00:00.000Z",
+            "assignmentInfo": {"linkToTask": "https://docs.google.com/document/d/D/edit?disco=X",
+                               "surfaceType": surface}}
+    text = gt.GoogletasksController.get_task_text(task, include_due=True, list_id="L1")
+    assert text == f"[ ] [[gtasks://L1/abc|✋]][[https://docs.google.com/document/d/D/edit?disco=X|{icon}↗]]" \
+                   " Fix the table _{//>2021-01-01//}"
+    m = gt.taskAnchorTreeRe.match(text)
+    assert (gt.parse_task_href(m[2]), m[3]) == (("L1", "abc"), "✋")
+    assert m[4].startswith("[[https://docs.google.com/")
+
+
+def test_get_task_text_links_email_and_keep(gt):
+    task = {"id": "abc", "title": "Bill", "links": [
+        {"type": "email", "description": "Bill", "link": "https://mail.google.com/mail/#all/1"},
+        {"type": "keep_note", "link": "https://keep.google.com/u/0/#NOTE/2"},
+        {"type": "future_thing", "link": "https://example.com/3"}]}
+    assert gt.GoogletasksController.get_task_text(task) == (
+        "[ ] [[gtasks://abc|✋]][[https://mail.google.com/mail/#all/1|📧↗]]"
+        "[[https://keep.google.com/u/0/#NOTE/2|📝↗]][[https://example.com/3|🔗↗]] Bill")
+
+
+@pytest.mark.parametrize("arrow", ["↗", ""])  # without the arrow: written by the first version of the feature
+def test_source_links_are_cut_from_the_title(gt, arrow):
+    title = f"[[https://docs.google.com/document/d/D/edit|📄{arrow}]]" \
+            f"[[https://mail.google.com/mail/#all/1|📧{arrow}]] Fix the table [[https://example.com|web]]"
+    links = [(m[1], m[2]) for m in gt.sourceLinkRe.finditer(title)]
+    assert links == [("https://docs.google.com/document/d/D/edit", "📄"), ("https://mail.google.com/mail/#all/1", "📧")]
+    assert gt.sourceLinkRe.sub("", title).strip() == "Fix the table [[https://example.com|web]]"
+    text = gt.GoogletasksController.get_task_text({"title": "Fix the table", "_source_links": links})
+    assert text == "[ ] [[https://docs.google.com/document/d/D/edit|📄↗]][[https://mail.google.com/mail/#all/1|📧↗]]" \
+                   " Fix the table"
+
+
+# real IDs: the API one is the URL-safe base64 of the one in the web link
+NEW_ID, NEW_WEB = "SWFNTmQzLTZ0c09jb0ZWbQ", "IaMNd3-6tsOcoFVm"
+OLD_ID, OLD_WEB = "MDY3ODI1MjUyNDk3ODIyNTAyODI6MDoyODgyNTYyODQxNDk4NTQ4", "06782525249782250282:0:2882562841498548"
+
+
+@pytest.mark.parametrize("task_id, web_id", [(NEW_ID, NEW_WEB), (OLD_ID, OLD_WEB)])
+@pytest.mark.parametrize("list_id", ["MDY3ODI1MjUyNDk3ODIyNTAyODI6MDow", "@default", None])
+def test_task_href_links_to_google_tasks(gt, task_id, web_id, list_id):
+    href = gt.task_href(task_id, list_id)
+    assert href.startswith("https://tasks.google.com/task/" + web_id)
+    assert ("?list=" in href) == bool(list_id)
+    assert gt.parse_task_href(href) == (list_id, task_id)
+    # webViewLink given by the server leads to the same
+    assert gt.task_href(task_id, list_id, f"https://tasks.google.com/task/{web_id}?sa=6") == href
+
+
+@pytest.mark.parametrize("task_id", ["abc", "a1", "1", "x"])
+def test_task_href_falls_back_to_gtasks_for_odd_ids(gt, task_id):
+    assert gt.task_href(task_id, "L") == f"gtasks://L/{task_id}"
+    assert gt.parse_task_href(f"gtasks://L/{task_id}") == ("L", task_id)
+
+
+def test_parse_task_href_ignores_other_links(gt):
+    assert gt.parse_task_href("https://docs.google.com/document/d/D") is None
+    assert gt.parse_task_href("gtasks://abc") == (None, "abc")
+
+
+def test_get_task_text_anchor_is_a_web_link(gt):
+    task = {"id": NEW_ID, "title": "Bill", "webViewLink": f"https://tasks.google.com/task/{NEW_WEB}?sa=6",
+            "links": [{"type": "email", "link": "https://mail.google.com/mail/#all/1"}]}
+    text = gt.GoogletasksController.get_task_text(task, list_id="L1", icon="💼")
+    assert text == f"[ ] [[https://tasks.google.com/task/{NEW_WEB}?list=L1|💼]]" \
+                   "[[https://mail.google.com/mail/#all/1|📧↗]] Bill"
+    m = gt.taskAnchorTreeRe.match(text)
+    assert (gt.parse_task_href(m[2]), m[3]) == (("L1", NEW_ID), "💼")
+    assert gt.sourceLinkRe.sub("", m[4]).strip() == "Bill"

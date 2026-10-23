@@ -1,4 +1,9 @@
 # Unreleased
+* new: tasks without a due date are imported (once, when they first appear) – `Import tasks without a due date` property, on by default
+* new: tasks assigned from Google Docs or Chat are imported – `Import tasks assigned to me from Google Docs or Chat` property, on by default
+* new: a link before the task title leads to where the task comes from: 📄↗ document, 💬↗ Chat space, 📧↗ e-mail, 📝↗ Keep note (the arrow makes room for the caret, so that Enter opens it)
+* enh: the task anchor (list icon) links to the task in Google Tasks, a click opens it; old `gtasks://` anchors still work
+* fix: the caret jumped to the end of the page when tasks were imported into the open page
 * fix: the nightly `zim --plugin googletasks` imported only the default task list, ignoring the lists chosen in the notebook properties
 
 # 1.2 (2026-10-14)
