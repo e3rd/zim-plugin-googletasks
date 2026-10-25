@@ -280,6 +280,13 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
     def run(self):
         ntb_name = self.get_notebook_argument()[0] or self.get_default_or_only_notebook()
         ntb, _ = build_notebook(ntb_name)
+        # With Zim running, this command is dispatched into its process and build_notebook() returns the
+        # cached Notebook of the open window. Its controller knows the window, so the caret stays put;
+        # a new windowless one would replace it in ntb.plugin_googletasks and throw the caret to the page end.
+        controller = getattr(ntb, "plugin_googletasks", None)
+        if controller and controller.window:
+            controller.fetch(True)
+            return  # we are inside the GUI process, no exit code reaches cron
         # the notebook properties, as the GUI uses them; preferences.conf holds only their defaults
         # (reading it imported just the default task list, not the ones chosen for the notebook)
         preferences = GoogletasksPlugin().notebook_properties(ntb)
