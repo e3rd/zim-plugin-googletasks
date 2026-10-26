@@ -53,10 +53,15 @@ def load_plugin_module(tmp_path, monkeypatch):
     class GoogleError(Exception):
         pass
 
+    class HttpError(GoogleError):
+        def __init__(self, resp, content, uri=None):
+            super().__init__(content)
+            self.resp, self.content, self.uri = resp, content, uri
+
     _module("httplib2", Http=_Anything, ServerNotFoundError=type("ServerNotFoundError", (Exception,), {}))
     _module("googleapiclient")
     _module("googleapiclient.discovery", build=None)
-    _module("googleapiclient.errors", Error=GoogleError)
+    _module("googleapiclient.errors", Error=GoogleError, HttpError=HttpError)
     _module("oauth2client", client=None, tools=None)
     _module("oauth2client.file", Storage=_Anything)
 

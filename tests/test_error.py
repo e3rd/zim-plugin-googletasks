@@ -36,3 +36,30 @@ def test_gui_fatal_or_no_statusbar_opens_dialog(gt, monkeypatch):
     statusbar = type("S", (), {"push": lambda self, i, t: None})()
     make(gt, type("W", (), {"statusbar": statusbar})()).error("Fatal", RuntimeError("x"), fatal=True)
     assert shown == [("Google Tasks: No bar", ""), ("Google Tasks: Fatal", "x")]
+
+
+def http_error(gt, status, body):
+    resp = type("Resp", (), {"status": status, "reason": "Forbidden"})()
+    return gt.HttpError(resp, body.encode())
+
+
+def test_disabled_api_is_explained_with_the_activation_link(gt, capsys):
+    url = "https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=123"
+    body = ('{"error": {"code": 403, "message": "Google Sheets API has not been used in project 123 before or it is'
+            ' disabled. Enable it by visiting ' + url + ' then retry.", "status": "PERMISSION_DENIED", "details": ['
+            '{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "SERVICE_DISABLED",'
+            ' "metadata": {"serviceTitle": "Google Sheets API", "activationUrl": "' + url + '"}}]}}')
+    assert gt.disabled_api_message(http_error(gt, 403, body)) == (
+        f"Google Sheets API is not enabled in the Google Cloud project of the OAuth client secret."
+        f" Enable it at {url} and try again in a few minutes.")
+    # older format, without details: the link is taken from the message
+    old = '{"error": {"errors": [{"reason": "accessNotConfigured"}], "message": "Enable it by visiting ' + url + ' then"}}'
+    assert url in gt.disabled_api_message(http_error(gt, 403, old))
+    make(gt).error("Cannot create the inbox sheet", http_error(gt, 403, body))
+    assert "Google Sheets API is not enabled" in capsys.readouterr().err
+
+
+def test_other_errors_are_kept(gt):
+    assert gt.disabled_api_message(http_error(gt, 403, '{"error": {"message": "The caller does not have permission"}}')) is None
+    assert gt.disabled_api_message(http_error(gt, 500, '{"error": {"reason": "SERVICE_DISABLED"}}')) is None
+    assert gt.disabled_api_message(ValueError("x")) is None

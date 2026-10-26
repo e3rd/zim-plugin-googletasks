@@ -33,6 +33,15 @@ By default the plugin uses the bundled `googletasks_client_id.json`. If it hits 
 
 The env var wins over the file, the file wins over the bundled secret. Already granted OAuth tokens belong to the client they were issued for, so after switching, re-grant them via `Tools / Google Tasks / Claim ... access`.
 
+### Inbox sheet: tasks from Claude (optional, off by default)
+A Google Sheet whose rows get imported as tasks 📥 at every sync (`Import new tasks`, on startup or from cron) and then deleted from it – so it stays empty. Meant for adding tasks from places that can write to a Google Sheet but not to Google Tasks, e.g. Claude in the mobile app ("make me a task …"), through its Google Drive / Sheets connector. You can add rows by hand, too.
+* `Tools / Google Tasks / Create inbox sheet...` – asks for one more permission in the browser (access to the files the plugin creates itself, nothing else), creates `Zim inbox (Google Tasks plugin)` in your Google Drive and sets it in `File / Properties / Google Tasks / Inbox sheet`. No token to copy anywhere.
+* The dialog then shows the sheet and a ready-made instruction to paste into Claude (`claude.ai / Settings / Profile`, or a project's instructions); `Copy instructions for Claude` puts it into the clipboard. When the sheet is set already, the menu item just shows the dialog again.
+* Rows 1-2 (a banner saying the sheet is managed by the plugin and the column header `text | due | note`) are frozen and protected by a warning. Columns are found by the header, so if it gets changed, nothing is imported or deleted until it is fixed.
+* An imported row is a plain Zim task (not a Google task), `due` becomes a Zim due date (`<2026-10-28`), `note` the next line.
+* To turn it off, empty the `Inbox sheet` property.
+* Needs the **Google Sheets API** enabled in the Google Cloud project of the client secret (else the plugin says so, with a link to enable it).
+
 ### Optional
 If you want to synchronise automatically, I recommend using `anacron`. This line helps me get synchronised at 7:30 AM or 5 minutes after computer launch (Ubuntu 17.04) even without restarting Zim:
 ```bash

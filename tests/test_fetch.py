@@ -97,7 +97,8 @@ def make_controller(gt, monkeypatch, items, cache, page_lines=("Home\n", "\n", "
     controller = object.__new__(gt.GoogletasksController)
     controller.window = None
     controller.preferences = {"include_start_date": False, "tasklist": tasklist, "page": "",
-                              "include_undated": undated is not None, "include_assigned": True}
+                              "include_undated": undated is not None, "include_assigned": True,
+                              "inbox_sheet": ""}
     controller.cache = cache
     cache.lists = lists or {}
     controller.failed = False
