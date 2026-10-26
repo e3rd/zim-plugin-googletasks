@@ -78,6 +78,8 @@ def load_plugin_module(tmp_path, monkeypatch):
     _module("zim.main", NotebookCommand=type("NotebookCommand", (), {}))
     _module("zim.main.command", GtkCommand=type("GtkCommand", (), {}))
     _module("zim.notebook", build_notebook=None, Path=_Anything)
+    _module("zim.notebook.operations", NotebookOperationOngoing=type("NotebookOperationOngoing", (Exception,), {}),
+            ongoing_operation=lambda notebook: getattr(notebook, "operation", None))
     _module("zim.notebook.page", Page=type("Page", (), {"reload_textbuffer": lambda self: None}))
     _module("zim.plugins", PluginClass=_Anything)
     import zim_page_content  # from _lib/, see pyproject.toml pythonpath

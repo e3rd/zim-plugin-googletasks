@@ -3,6 +3,7 @@
 * new: tasks assigned from Google Docs or Chat are imported – `Import tasks assigned to me from Google Docs or Chat` property, on by default
 * new: a link before the task title leads to where the task comes from: 📄↗ document, 💬↗ Chat space, 📧↗ e-mail, 📝↗ Keep note (the arrow makes room for the caret, so that Enter opens it)
 * enh: the task anchor (list icon) links to the task in Google Tasks, a click opens it; old `gtasks://` anchors still work
+* enh: Zim no longer freezes while talking to Google: imports, status sync, ticking a checkbox, submitting a task, claiming access run in the background, one by one (the window title shows ⟳ Google Tasks meanwhile); a checkbox is ticked at once and put back if the server refuses; requests time out after 30 s
 * new: inbox sheet – rows of a Google Sheet are imported as tasks 📥 and deleted from it, so that e.g. Claude in the mobile app can add tasks (`Tools / Google Tasks / Create inbox sheet...`, off by default)
 * fix: the caret jumped to the end of the page when tasks were imported into the open page (also by `zim --plugin googletasks` from cron while Zim is running)
 * fix: the nightly `zim --plugin googletasks` imported only the default task list, ignoring the lists chosen in the notebook properties

@@ -9,10 +9,12 @@ import datetime
 import json
 import logging
 import os
+import queue
 import re
 import sys
+import threading
 from pathlib import Path
-from time import time
+from time import sleep, time
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
@@ -53,6 +55,7 @@ from zim.formats import CHECKED_BOX, UNCHECKED_BOX
 from zim.main import NotebookCommand
 from zim.main.command import GtkCommand
 from zim.notebook import build_notebook, Path as ZimPath
+from zim.notebook.operations import NotebookOperationOngoing, ongoing_operation
 from zim.notebook.page import Page
 from zim.plugins import PluginClass
 from zim.gui.mainwindow import MainWindowExtension
@@ -142,6 +145,10 @@ sourceLinkRe = re.compile(r'\[\[(https?://[^|\]]+)\|(📄|💬|📧|📝|🔗)' 
 """ A link to where the task comes from, see SOURCE_ICONS: 1 URL, 2 icon. """
 start_date_in_title = re.compile(r'(.*)>(\d{4}-\d{2}(-\d{2})?)(.*)')  # (_\{//)?  (//})?
 INVALID_DAY = "N/A"
+HTTP_TIMEOUT = 30
+"seconds; without it, a dead network would keep a job (and the jobs queued after it) waiting forever"
+BUSY_SUFFIX = " ⟳ Google Tasks"
+"appended to the window title while the jobs talking to Google run"
 INBOX_ICON = "📥"
 "marks the tasks imported from the inbox sheet"
 INBOX_TITLE = "Zim inbox (Google Tasks plugin)"
@@ -323,7 +330,12 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
             if bullet in [CHECKED_BOX, UNCHECKED_BOX]:
                 controller: GoogletasksController = self.notebook.plugin_googletasks
                 list_id, task_id = controller.get_task_id(line, buffer=self)
-                if task_id and not controller.task_checked(list_id, task_id, bullet):
+                if task_id:
+                    previous = self.get_bullet(line)
+                    self.set_bullet_original(line, bullet, indent=indent)
+                    # ticked at once, the server is told in the background; if it fails, the tick is undone
+                    controller.background(lambda: controller.task_checked(list_id, task_id, bullet)
+                                          or on_main(controller.revert_bullet, self, list_id, task_id, previous))
                     return
             self.set_bullet_original(line, bullet, indent=indent)
 
@@ -379,7 +391,7 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
         # a new windowless one would replace it in ntb.plugin_googletasks and throw the caret to the page end.
         controller = getattr(ntb, "plugin_googletasks", None)
         if controller and controller.window:
-            controller.fetch(True)
+            controller.background(lambda: controller.fetch(True), "import")
             return  # we are inside the GUI process, no exit code reaches cron
         # the notebook properties, as the GUI uses them; preferences.conf holds only their defaults
         # (reading it imported just the default task list, not the ones chosen for the notebook)
@@ -420,7 +432,7 @@ class GoogleCalendarApi:
             self.credential_path = GoogleCalendarApi.permission_read_file
             self.scope = 'https://www.googleapis.com/auth/tasks.readonly'
         credentials = self.get_credentials()
-        http = credentials.authorize(httplib2.Http())
+        http = credentials.authorize(httplib2.Http(timeout=HTTP_TIMEOUT))
         return discovery.build('tasks', 'v1', http=http)
 
     def get_inbox_services(self, claim=False):
@@ -432,7 +444,7 @@ class GoogleCalendarApi:
         credentials = self.get_credentials(claim)
         if not credentials:
             raise LookupError(INBOX_MISSING)
-        http = credentials.authorize(httplib2.Http())
+        http = credentials.authorize(httplib2.Http(timeout=HTTP_TIMEOUT))
         return discovery.build('sheets', 'v4', http=http)
 
     def get_credentials(self, claim=True):
@@ -471,6 +483,117 @@ def monkeypatch_method(cls):
         return func
 
     return decorator
+
+
+def on_main(fn, *args):
+    """ Call `fn(*args)` in the GTK main thread and return its result (or raise its exception).
+
+    Anything touching GTK – a page, the buffer, a dialog, the preferences (their `changed` signal) – must
+    run there; the jobs of Worker call it from their thread. Called in the main thread (always so when
+    headless), it simply calls `fn`. The main thread never waits for the worker, so this cannot deadlock.
+    """
+    if threading.current_thread() is threading.main_thread():
+        return fn(*args)
+    done = threading.Event()
+    result = {}
+
+    def call():
+        try:
+            result["value"] = fn(*args)
+        except BaseException as e:  # handed over to the waiting thread
+            result["error"] = e
+        finally:
+            done.set()
+        return False  # once, not again (GLib.idle_add)
+
+    GLib.idle_add(call)
+    done.wait()
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
+
+def wait_for_notebook(notebook, timeout=300):
+    """ Wait (in a Worker job) until Zim finishes its notebook operation, e.g. the index update after its start.
+        Meanwhile it refuses to store pages. Headless, in the main thread, there is nothing to wait for. """
+    if threading.current_thread() is threading.main_thread():
+        return
+    deadline = time() + timeout
+    while on_main(ongoing_operation, notebook) and time() < deadline:
+        sleep(1)
+
+
+class Worker:
+    """ Runs the jobs that talk to Google one by one in a background thread, so that Zim does not freeze.
+
+    A job does the network part itself and hands the GTK part (the page, dialogs) over by on_main().
+    One at a time, in order: they share the cache and the page, and a checkbox ticked during
+    an import must not overtake it. A named job (an import) is not queued again while it is queued or running.
+    While there are jobs, the window title gets BUSY_SUFFIX (Zim 0.75 has no status bar); when Zim rewrites
+    the title (another page opened – also the very first one, after the startup import has been queued),
+    the suffix is put back.
+    """
+
+    def __init__(self, window, on_error):
+        self.window = window
+        self.on_error = on_error
+        "called (in the main thread) with an exception a job raised, a bug - expected failures are reported by the job"
+        self.queue = queue.Queue()
+        self.thread = None
+        self.count = 0
+        "jobs queued or running; changed in the main thread only"
+        self.names = set()
+        if hasattr(window, "connect"):
+            window.connect("notify::title", lambda *_: self.count and self._busy(True))
+
+    def submit(self, job, name=None):
+        """ Queue the job. Returns False if a job of this name is queued or running already. """
+        if name and name in self.names:
+            logger.info("[Googletasks] %s is running already", name)
+            return False
+        if name:
+            self.names.add(name)
+        self.count += 1
+        if self.count == 1:
+            self._busy(True)
+        self.queue.put((job, name))
+        if not self.thread:
+            self.thread = threading.Thread(target=self._run, name="googletasks", daemon=True)
+            self.thread.start()
+        return True
+
+    def _run(self):
+        while True:
+            job, name = self.queue.get()
+            # noinspection PyBroadException
+            try:
+                job()
+            except Exception as e:
+                logger.exception("[Googletasks] job failed")
+                GLib.idle_add(self._report, e)
+            GLib.idle_add(self._finished, name)
+
+    def _report(self, exc):
+        self.on_error(exc)
+        return False
+
+    def _finished(self, name):
+        self.names.discard(name)
+        self.count -= 1
+        if not self.count:
+            self._busy(False)
+        return False
+
+    def _busy(self, busy):
+        try:
+            current = self.window.get_title() or ""
+            title = current.replace(BUSY_SUFFIX, "")
+            if busy:
+                title += BUSY_SUFFIX
+            if title != current:  # (setting it again would notify again, see __init__)
+                self.window.set_title(title)
+        except Exception as e:  # a cosmetic thing, never worth failing a job for
+            logger.debug("Cannot set the window title: %s", e)
 
 
 def _line_text(buffer, line):
@@ -520,7 +643,7 @@ class GoogletasksWindow(MainWindowExtension):
         MainWindowExtension.__init__(self, plugin, window)  # super(WindowExtension, self).__init__(*args, **kwargs)
 
         if self.plugin.preferences['startup_check']:
-            controller.fetch()
+            controller.background(controller.fetch, "import")
 
     def _add_actions(self, uimanager):
         """ Set up menu items.
@@ -675,30 +798,34 @@ class GoogletasksWindow(MainWindowExtension):
 
     @action(_('_Claim read only access'))  # T: menu item
     def permission_readonly(self):
-        self.controller.calendar_api.get_service()
+        self.controller.background(self.controller.calendar_api.get_service, "claim")
 
     @action(_('_Claim write access'))  # T: menu item
     def permission_write(self):
-        self.controller.calendar_api.get_service(write_access=True)
+        self.controller.background(lambda: self.controller.calendar_api.get_service(write_access=True), "claim")
 
     @action(_('_Import new tasks'), accelerator='<ctrl><alt>g')  # T: menu item
     def import_tasks(self):
         if self.controller.preferences["auto_sync"]:
             self.sync_status()
-        self.controller.fetch(force=True)
+        self.controller.background(lambda: self.controller.fetch(force=True), "import")
 
     @action(_('_Import all non-completed even already imported tasks from the past'))  # T: menu item
     def import_history(self):
         if self.controller.preferences["auto_sync"]:
             self.sync_status()
-        self.controller.fetch(all_history=True)
+        self.controller.background(lambda: self.controller.fetch(all_history=True), "import")
 
     @action(_('Create _inbox sheet...'))  # T: menu item
     def create_inbox(self):
         """ Create the inbox sheet (or show the one already set) and how to tell Claude about it. """
-        url = self.controller.create_inbox()
-        if not url:
-            return
+        def job():
+            url = self.controller.create_inbox()
+            if url:  # not waited for, the dialog would hold the jobs queued after this one
+                GLib.idle_add(self._show_inbox, url)
+        self.controller.background(job, "inbox")
+
+    def _show_inbox(self, url):
         prompt = INBOX_CLAUDE_PROMPT.format(url=url)
         dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, message_type=Gtk.MessageType.INFO,
                                    text=_("Inbox sheet is ready"))
@@ -721,15 +848,16 @@ class GoogletasksWindow(MainWindowExtension):
             else:
                 break
         dialog.destroy()
+        return False  # once (GLib.idle_add)
 
     @action(_('_Sync tasks status from server'))  # T: menu item
     def sync_status(self):
-        self.controller.sync_bullets_from_server()
+        self.controller.background(self.controller.sync_bullets_from_server, "sync")
 
     @action(_('_Refresh task lists'))  # T: menu item
     def refresh_task_lists(self):
-        if self.controller.refresh_task_lists():
-            self.build_list_menu()
+        self.controller.background(lambda: self.controller.refresh_task_lists() and on_main(self.build_list_menu),
+                                   "lists")
 
 
 class GoogletasksNewTaskDialog(Dialog):
@@ -921,8 +1049,8 @@ class GoogletasksNewTaskDialog(Dialog):
             return False
         self._load_task()
         self.destroy()  # immediately close (so that we wont hit Ok twice)
-        if not self.controller.submit_task(task=self.task):
-            self.do_response_cancel()
+        self.controller.background(lambda: self.controller.submit_task(task=self.task)
+                                   or on_main(self.do_response_cancel))
         return True
 
     def do_response_cancel(self):
@@ -962,6 +1090,23 @@ class GoogletasksController:
         self.calendar_api = GoogleCalendarApi(self)
         self.failed = False
         "True once error() was called; the headless command turns it into a non-zero exit code"
+        self.worker = Worker(window, lambda e: self.error("Unexpected error", e, fatal=True)) if window else None
+
+    def background(self, job, name=None):
+        """ Run the job talking to Google in the background (see Worker), or right now when headless
+            (nothing to freeze, and the command must know whether it failed). """
+        if self.worker:
+            return self.worker.submit(job, name)
+        job()
+        return True
+
+    def revert_bullet(self, buffer, list_id, task_id, bullet):
+        """ Put the checkbox of the task back to `bullet`, the server refused the change (see set_bullet). """
+        for line in range(buffer.get_line_count()):
+            if self.get_task_id(line, buffer) == (list_id, task_id):
+                buffer.set_bullet_original(line, bullet)
+                self.info(f"Checkbox of task {task_id} reverted")
+                return
 
     @property
     def tasklists(self):
@@ -1133,6 +1278,8 @@ class GoogletasksController:
         Headless (`zim --plugin googletasks`) it is written to stderr and marks the controller
         as `failed`, which makes the command exit with a non-zero code.
         """
+        if threading.current_thread() is not threading.main_thread():
+            return on_main(self.error, msg, exc, fatal)
         exc = disabled_api_message(exc) or exc
         text = f"{msg}: {exc}" if exc else str(msg)
         logger.error("[Googletasks] %s", text, exc_info=exc if isinstance(exc, BaseException) else None)
@@ -1179,7 +1326,7 @@ class GoogletasksController:
                 page_token = results.get('nextPageToken')
                 if not page_token:
                     return [item for item in items if not item.get("due")] if undated else items
-        except (httplib2.ServerNotFoundError, Error) as e:
+        except (httplib2.ServerNotFoundError, OSError, Error) as e:
             self.error("Cannot read the task list", e)
             raise LookupError from e
 
@@ -1402,25 +1549,23 @@ class GoogletasksController:
         self.cache.undated_ids = undated_ids | (self.cache.undated_ids - items_ids)
         self.cache.items_ids = items_ids
         save = self.cache.touch_save if complete else self.cache.save
+        wait_for_notebook(self.notebook)
+        try:
+            on_main(self._insert_tasks, texts, icons, save if texts or cache_exists else None)
+        except NotebookOperationOngoing as e:  # the cache is not saved, the tasks are imported next time
+            self.error("Notebook busy, tasks will be imported at the next sync", e)
 
-        # Refreshes page from current configuration
+    def _insert_tasks(self, texts, icons, save):
+        """ Insert the imported tasks into the page (in the main thread, see on_main), then call `save`
+            (the cache, which must not remember them as imported before they are on the page). """
         page = self._get_page()
         per_list = ", ".join(f"{icon} {icons.count(icon)}" for icon in dict.fromkeys(icons))
         self.info(f"New tasks: {len(texts)}{f' ({per_list})' if len(self.tasklists) > 1 and texts else ''},"
                   f" page: {page.get_title()}")
-        if not texts:
-            if cache_exists:
-                save()
-            return
-        text = "\n".join(texts) + "\n"
-
-        # Insert tasks string into page
-        contents = insert_after_first_blank_line(page.dump("wiki"), text)
-
-        self._store_to_page(contents, page)
-
-        # Save the list of successfully imported task
-        save()
+        if texts:
+            self._store_to_page(insert_after_first_blank_line(page.dump("wiki"), "\n".join(texts) + "\n"), page)
+        if save:
+            save()
         # with open(CACHE_FILE, "wb") as f:
         #     pickle.dump(self.item_ids, f)
 
@@ -1444,7 +1589,7 @@ class GoogletasksController:
         except LookupError as e:
             self.error(str(e))
             return None
-        except (httplib2.ServerNotFoundError, Error, KeyError, IndexError) as e:
+        except (httplib2.ServerNotFoundError, OSError, Error, KeyError, IndexError) as e:
             self.error(INBOX_MISSING, e)
             return None
         try:
@@ -1456,19 +1601,27 @@ class GoogletasksController:
             return 0
         texts = [text for text in (get_inbox_text(*row[1:]) for row in rows) if text]
         if texts:
-            page = self._get_page()
-            self._store_to_page(insert_after_first_blank_line(page.dump("wiki"), "\n".join(texts) + "\n"), page)
-            self.info(f"New tasks from the inbox sheet: {len(texts)}, page: {page.get_title()}")
+            wait_for_notebook(self.notebook)
+            try:
+                on_main(self._insert_inbox, texts)
+            except NotebookOperationOngoing as e:  # the rows stay in the sheet, imported next time
+                self.error("Notebook busy, the inbox sheet will be imported at the next sync", e)
+                return None
         # bottom up, so that the indexes of the rows still to delete do not move; rows added meanwhile go below
         requests = [{"deleteDimension": {"range": {"sheetId": grid_id, "dimension": "ROWS",
                                                    "startIndex": index, "endIndex": index + 1}}}
                     for index, *_row in sorted(rows, reverse=True)]
         try:
             sheets.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
-        except (httplib2.ServerNotFoundError, Error) as e:
+        except (httplib2.ServerNotFoundError, OSError, Error) as e:
             self.error("Tasks imported from the inbox sheet, but not deleted from it – delete them by hand,"
                        " else they are imported again", e, fatal=True)
         return len(texts)
+
+    def _insert_inbox(self, texts):
+        page = self._get_page()
+        self._store_to_page(insert_after_first_blank_line(page.dump("wiki"), "\n".join(texts) + "\n"), page)
+        self.info(f"New tasks from the inbox sheet: {len(texts)}, page: {page.get_title()}")
 
     def create_inbox(self):
         """ Create the inbox sheet and set it in the preferences. If one is set and accessible already,
@@ -1483,7 +1636,7 @@ class GoogletasksController:
             try:
                 self._inbox_sheet(sheets, sheet_id)
                 return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-            except (httplib2.ServerNotFoundError, Error, KeyError, IndexError) as e:
+            except (httplib2.ServerNotFoundError, OSError, Error, KeyError, IndexError) as e:
                 self.info(f"The inbox sheet set is not accessible, creating a new one: {e}")
 
         def cells(texts, bold, background):
@@ -1511,12 +1664,18 @@ class GoogletasksController:
                     "range": {"sheetId": grid_id, "startRowIndex": 0, "endRowIndex": INBOX_HEADER_ROWS},
                     "description": "Managed by the Google Tasks plugin for Zim", "warningOnly": True}}},
             ]}).execute()
-        except (httplib2.ServerNotFoundError, Error, KeyError, IndexError) as e:
+        except (httplib2.ServerNotFoundError, OSError, Error, KeyError, IndexError) as e:
             self.error("Cannot create the inbox sheet", e, fatal=True)
             return None
-        self.preferences["inbox_sheet"] = spreadsheet["spreadsheetUrl"]
+        on_main(self._set_inbox_sheet, spreadsheet["spreadsheetUrl"])
         self.info(f"Inbox sheet created: {spreadsheet['spreadsheetUrl']}")
         return spreadsheet["spreadsheetUrl"]
+
+    def _set_inbox_sheet(self, url):
+        """ Set the inbox sheet in the notebook properties and save them – Zim itself writes notebook.zim
+            only from its Properties dialog, the sheet would be forgotten at the next start. """
+        self.preferences["inbox_sheet"] = url
+        self.notebook.config.write()
 
     def _store_to_page(self, contents, page):
         """
@@ -1529,6 +1688,9 @@ class GoogletasksController:
         (The names used to be compared by `is`, which is False for two equal strings that are
         not the same object, so the caret was never restored and jumped to the end.)
         """
+        operation = ongoing_operation(self.notebook)
+        if operation:  # store_page() would be refused after the page had been changed already – and autosaved later
+            raise NotebookOperationOngoing(operation.message)
         pageview = anchor = None
         if self.window and self.window.pageview.page and self.window.pageview.page.name == page.name:
             pageview = self.window.pageview
@@ -1557,40 +1719,50 @@ class GoogletasksController:
             return False
         cache = {task["id"]: task["status"] == "completed" for task, _list_id, _icon in items}
 
-        allow_single_search = True
+        # the page is read (and written) in the main thread, the server is asked here, in between
+        tasks = []
+        for line in on_main(lambda: self._get_page().dump("wiki")):
+            match = taskAnchorTreeRe.match(line)
+            if match:
+                tasks.append((*parse_task_href(match[2]), match[4]))
+
         unidentified_tasks = []
+        for list_id, task_id, task_text in tasks:
+            if task_id in cache:
+                continue
+            # perform single search, this task was not fetched within the cache
+            try:
+                task = service.tasks().get(task=task_id, tasklist=list_id or self.primary_list_id).execute()
+            except Error as e:
+                logger.warning("Task %s not found on the server: %s", task_id, e)
+                unidentified_tasks.append(task_text)
+                cache[task_id] = None  # not asked again for the same task on the page
+            except (LookupError, httplib2.ServerNotFoundError, OSError) as e:  # OSError: timeout, no network
+                self.error("Cannot look up task status", e)
+                break
+            else:
+                cache[task_id] = task["status"] == "completed"
+        on_main(self._set_bullets, cache)
+        if unidentified_tasks:
+            self.info(f"Cannot identify {len(unidentified_tasks)} tasks: " + ", ".join(unidentified_tasks))
+
+    def _set_bullets(self, statuses):
+        """ Un/check the tasks on the page by {task_id: completed} (None = unknown, left as is).
+            The page is read again, it may have changed while the server was asked. """
         page = self._get_page()
         contents = []
         for line in page.dump("wiki"):
             match = taskAnchorTreeRe.match(line)
             if match:
-                list_id, task_id = parse_task_href(match[2])
-                task_text = match[4]
-                completed = cache.get(task_id, None)
-
-                # perform single search if needed, this task was not fetched within the cache
-                if completed is None and allow_single_search:
-                    try:
-                        task = service.tasks().get(task=task_id, tasklist=list_id or self.primary_list_id).execute()
-                    except Error as e:
-                        logger.warning("Task %s not found on the server: %s", task_id, e)
-                        unidentified_tasks.append(task_text)
-                    except (LookupError, httplib2.ServerNotFoundError) as e:
-                        self.error("Cannot look up task status", e)
-                        allow_single_search = False
-                    else:
-                        completed = task["status"] == "completed"
-
+                _list_id, task_id = parse_task_href(match[2])
+                completed = statuses.get(task_id)
                 if completed is not None:  # we know the current status, replace the line
                     # strip "[.] " (a dot may be "*", "x", " ") from the beginning
                     task_s_without_bullet = match[0][(len(match[1]) if match[1] else 0):]
                     # put "[*]" or "[ ]" to the beginning
                     line = "[{0}] {1}".format(("*" if completed else " "), task_s_without_bullet) + "\n"
-
             contents.append(line)
         self._store_to_page(contents, page)
-        if unidentified_tasks:
-            self.info(f"Cannot identify {len(unidentified_tasks)} tasks: " + ", ".join(unidentified_tasks))
 
     def refresh_task_lists(self):
         self.cache.load()
@@ -1598,7 +1770,7 @@ class GoogletasksController:
         try:
             results = service.tasklists().list().execute()
             default_id = service.tasklists().get(tasklist=DEFAULT_LIST).execute()["id"]
-        except (httplib2.ServerNotFoundError, Error) as e:
+        except (httplib2.ServerNotFoundError, OSError, Error) as e:
             self.error("Cannot refresh task lists", e)
             return False
         items = results.get('items', [])
@@ -1606,10 +1778,10 @@ class GoogletasksController:
             self.info('No task lists found.')
             return False
 
-        self.cache.lists.clear()
-        # the default list first, chosen_lists() relies on that to put a title to '@default'
-        for tasklist in sorted(items, key=lambda tl: tl["id"] != default_id):
-            self.cache.lists[tasklist["title"]] = tasklist["id"]
+        # the default list first, chosen_lists() relies on that to put a title to '@default';
+        # replaced at once, not cleared and refilled: the menu may be reading it from the main thread
+        self.cache.lists = {tasklist["title"]: tasklist["id"]
+                            for tasklist in sorted(items, key=lambda tl: tl["id"] != default_id)}
         self.info(f'{len(items)} task lists discovered you can choose in the menu.')
         self.cache.save()
         return True

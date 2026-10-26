@@ -147,3 +147,15 @@ def test_failed_delete_is_reported_after_import(gt, monkeypatch):
     assert c.import_inbox() == 1
     assert "Alpha" in c.notebook.page.parsed
     assert c.failed
+
+
+def test_busy_notebook_leaves_page_and_rows(gt, monkeypatch):
+    """ Zim updating its index refuses store_page(): the page must not be changed (it would be autosaved
+        with the tasks) and the rows must stay in the sheet, to be imported next time. """
+    c = make_controller(gt, monkeypatch, [BANNER, HEADER, ["Alpha"]])
+    c.notebook.operation = type("Operation", (), {"message": "Updating index"})()
+    assert c.import_inbox() is None
+    assert c.notebook.page.parsed is None
+    assert c.notebook.stored == []
+    assert c.sheets.updates == []
+    assert c.failed
