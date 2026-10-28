@@ -331,11 +331,16 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
                 controller: GoogletasksController = self.notebook.plugin_googletasks
                 list_id, task_id = controller.get_task_id(line, buffer=self)
                 if task_id:
-                    previous = self.get_bullet(line)
-                    self.set_bullet_original(line, bullet, indent=indent)
                     # ticked at once, the server is told in the background; if it fails, the tick is undone
-                    controller.background(lambda: controller.task_checked(list_id, task_id, bullet)
-                                          or on_main(controller.revert_bullet, self, list_id, task_id, previous))
+                    revert = (self.page.name, task_id, self.get_bullet(line), controller.line_markup(self, line),
+                              controller.tick(task_id))
+                    self.set_bullet_original(line, bullet, indent=indent)
+
+                    def job():
+                        if controller.task_checked(list_id, task_id, bullet) is False:
+                            on_main(controller.revert_bullet, *revert)
+
+                    controller.background(job)
                     return
             self.set_bullet_original(line, bullet, indent=indent)
 
@@ -597,6 +602,9 @@ class Worker:
 
 
 CHECKBOXES = (UNCHECKED_BOX, CHECKED_BOX, XCHECKED_BOX, MIGRATED_BOX, TRANSMIGRATED_BOX)
+BOX_MARKUP = {UNCHECKED_BOX: "[ ]", CHECKED_BOX: "[*]", XCHECKED_BOX: "[x]", MIGRATED_BOX: "[>]",
+              TRANSMIGRATED_BOX: "[<]"}
+"the checkboxes in the wiki markup"
 
 
 def ends_task(buffer, line):
@@ -1094,6 +1102,8 @@ class GoogletasksController:
         self.calendar_api = GoogleCalendarApi(self)
         self.failed = False
         "True once error() was called; the headless command turns it into a non-zero exit code"
+        self.ticks = {}
+        "{task_id: number of its last tick}, see tick()"
         self.worker = Worker(window, lambda e: self.error("Unexpected error", e, fatal=True)) if window else None
 
     def background(self, job, name=None):
@@ -1104,13 +1114,55 @@ class GoogletasksController:
         job()
         return True
 
-    def revert_bullet(self, buffer, list_id, task_id, bullet):
-        """ Put the checkbox of the task back to `bullet`, the server refused the change (see set_bullet). """
-        for line in range(buffer.get_line_count()):
-            if self.get_task_id(line, buffer) == (list_id, task_id):
-                buffer.set_bullet_original(line, bullet)
-                self.info(f"Checkbox of task {task_id} reverted")
-                return
+    def tick(self, task_id):
+        """ Number the tick of the task's checkbox (in the main thread, see set_bullet), so that revert_bullet
+            knows whether the user has un/ticked the task again since. """
+        self.ticks[task_id] = self.ticks.get(task_id, 0) + 1
+        return self.ticks[task_id]
+
+    @staticmethod
+    def line_markup(buffer, line):
+        """ Wiki markup of the line in the buffer, without the newline. """
+        start = buffer.get_iter_at_line(line)
+        end = start.copy()
+        if not end.ends_line():
+            end.forward_to_line_end()
+        return "".join(get_dumper("wiki").dump(buffer.get_parsetree((start, end)))).rstrip("\n")
+
+    def revert_bullet(self, page_name, task_id, bullet, markup, tick):
+        """ The server refused the un/tick of the task: put its checkbox back to `bullet`.
+            If the line is gone meanwhile (the task ticked as done and deleted), it is put back – its `markup`
+            from before the tick – to the top of the page (after the first blank line, where new tasks go).
+
+            The page is taken from the notebook, as the import does (see _store_to_page), never through the
+            buffer of the tick: the user may have left the page meanwhile and a buffer of a page no longer shown
+            is not saved, or worse, saved later over what has been written to the page file since (cron import).
+            :param tick: see tick(); if the task has been un/ticked again since, the newest tick decides.
+        """
+        if self.ticks.get(task_id) != tick:
+            return
+        page = self.notebook.get_page(ZimPath(page_name))
+        if not page.exists():  # deleted or moved meanwhile, not to be recreated
+            page = self._get_page()
+        lines = page.dump("wiki")
+        for i, line in enumerate(lines):
+            text = line.lstrip("\t")
+            match = taskAnchorTreeRe.match(text)
+            if match and parse_task_href(match[2])[1] == task_id:
+                box = BOX_MARKUP.get(bullet)
+                indent = line[:len(line) - len(text)]
+                lines[i] = indent + (box + " " if box else "") + text[len(match[1] or ""):]
+                message = f"Checkbox of task {task_id} reverted"
+                break
+        else:
+            lines = insert_after_first_blank_line(lines, markup + "\n")
+            message = f"Task {task_id} put back to the page {page.name}"
+        try:
+            self._store_to_page(lines, page)
+        except NotebookOperationOngoing as e:
+            self.error(f"Notebook busy, cannot revert the checkbox of task {task_id}: {markup}", e)
+            return
+        self.info(message)
 
     @property
     def tasklists(self):
@@ -1178,12 +1230,12 @@ class GoogletasksController:
     def task_checked(self, list_id, task_id, bullet):
         """ un/mark task on Google server
         :param list_id: None for the links written before multiple lists were supported
+        :return: True if done, False if failed, None if the task is not on the server any more
         """
         task = {"status": "completed" if bullet is CHECKED_BOX else "needsAction"}
-        service = self.calendar_api.get_service(write_access=True,
-                                                info=f"Marking task ID {task_id} as {task['status']}")
-
         try:
+            service = self.calendar_api.get_service(write_access=True,
+                                                    info=f"Marking task ID {task_id} as {task['status']}")
             list_id = list_id or self.primary_list_id
             if bullet is CHECKED_BOX:  # small patch will be sufficient
                 service.tasks().patch(tasklist=list_id, task=task_id, body=task).execute()
@@ -1192,6 +1244,12 @@ class GoogletasksController:
                 task.pop("completed", None)
                 task["status"] = "needsAction"
                 service.tasks().update(tasklist=list_id, task=task_id, body=task).execute()
+        except HttpError as e:
+            if e.resp.status in (404, 410):  # deleted on the server, nothing to revert to
+                self.error(f"Task {task_id} is not on the server any more", e)
+                return None
+            self.error("Error in communication while un/checking", e)
+            return False
         except LookupError as e:
             self.error("Cannot un/check the task", e)
             return False
