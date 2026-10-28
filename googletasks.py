@@ -6,6 +6,7 @@ from __future__ import annotations, print_function
 import base64
 import binascii
 import datetime
+import html
 import json
 import logging
 import os
@@ -165,7 +166,18 @@ INBOX_CLAUDE_PROMPT = (
     "When I ask you to make a task for me (\"make a task\", \"udělej mi úkol\"…), append a row to the Google Sheet"
     " {url} (sheet \"Inbox\", columns A-C): text = the task, due = a date YYYY-MM-DD only if I mention one,"
     " note = optional details. Only append rows, never edit or delete existing ones.")
+INBOX_CALENDAR_TITLE = "Zim inbox"
+INBOX_CALENDAR_DESCRIPTION = ("📥 Managed by the Google Tasks plugin for Zim. Its events are imported into Zim as tasks"
+                              " at every sync and then deleted from this calendar.")
+INBOX_CALENDAR_MISSING = "Inbox calendar not accessible – run Tools / Google Tasks / Create inbox calendar again"
+INBOX_CALENDAR_CLAUDE_PROMPT = (
+    "When I ask you to make a task for me (\"make a task\", \"udělej mi úkol\"…), create an event in my Google"
+    " Calendar \"Zim inbox\" (calendar ID {calendar_id}): summary = the task, an all-day event on the date I mention"
+    " (today if none), description = optional details. Only create events there, never edit or delete them.")
+INBOX_CALENDAR_BATCH = 50
+"events deleted in one batch request (the Calendar API takes up to 50)"
 sheetIdRe = re.compile(r'/spreadsheets/d/([\w-]+)')
+htmlLinkRe = re.compile(r'<a\s[^>]*href="([^"]*)"[^>]*>(.*?)</a>', re.I | re.S)
 activationUrlRe = re.compile(r'https://console\.(?:developers|cloud)\.google\.com/\S+?(?=["\s]|$)')
 
 
@@ -242,6 +254,30 @@ def get_inbox_text(text, due="", note=""):
     return s
 
 
+def html_to_text(s):
+    """ Plain text of an event description, which Google Calendar may keep as HTML. A link keeps its URL. """
+    s = htmlLinkRe.sub(lambda m: m[1] if m[2] in (m[1], "") else f"{m[2]} {m[1]}", s)
+    s = re.sub(r"<br\s*/?>|</p>|</div>|</li>", "\n", s, flags=re.I)
+    return html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
+
+
+def get_event_task(event):
+    """ (text, due, note) of an event of the inbox calendar, as get_inbox_text takes them. The due date is
+        the day of the event, the time of a timed one follows the text; a repeated one is imported once. """
+    start = event.get("start") or {}
+    text = event.get("summary") or ""
+    due = start.get("date") or ""
+    if start.get("dateTime"):  # in the time zone of the calendar (UTC for the one the plugin created)
+        local = dateutil.parser.isoparse(start["dateTime"]).astimezone()
+        due = local.date().isoformat()
+        if text:
+            text += local.strftime(" %H:%M")
+    note = html_to_text(event.get("description") or "")
+    if event.get("recurrence"):
+        note = "\n".join(filter(None, (note, "repeats: " + "; ".join(event["recurrence"]))))
+    return text, due, note
+
+
 def parse_tasklists(pref):
     """ Preference string -> [(title, icon)] of the task lists to work with, the first one being primary.
 
@@ -304,6 +340,11 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
         ('inbox_sheet', 'string', _('Inbox sheet (empty = off)'
                                     '\nFilled in by Tools / Google Tasks / Create inbox sheet. Its rows are imported'
                                     ' as tasks, then deleted from the sheet.'), ""),
+        ('inbox_calendar', 'string', _('Inbox calendar (empty = off)'
+                                       '\nFilled in by Tools / Google Tasks / Create inbox calendar. Its events are'
+                                       ' imported as tasks, then deleted from the calendar.'), ""),
+        ('inbox_calendar_tasklist', 'string', _('Inbox calendar: make Google Tasks of its events in this list'
+                                                '\n(empty = plain Zim tasks 📥, "@default" = the default list)'), ""),
         ('tasklist', 'string', _('Task lists to import (empty = default)'
                                  '\nComma separated, optionally with an icon, ex: "My Tasks, Work=💼".'
                                  '\nThe first one is used for new tasks.'), ""),
@@ -414,6 +455,10 @@ class GoogleCalendarApi:
     inbox_scope = 'https://www.googleapis.com/auth/drive.file'
     """ Only the files the plugin created itself – the inbox sheet. Unlike the `spreadsheets` scope
         (every sheet of the user), it is not a sensitive one, Google needs no verification of the app for it. """
+    permission_inbox_calendar_file = os.path.join(WORKDIR, 'googletasks_oauth_calendar.json')
+    inbox_calendar_scope = 'https://www.googleapis.com/auth/calendar.app.created'
+    """ Only the calendars the plugin created itself – the inbox calendar. The other calendars of the user
+        do not exist for it: reading, changing or deleting them (or their events) ends with 404. """
 
     def __init__(self, controller):
         self.credential_path = None
@@ -427,7 +472,8 @@ class GoogleCalendarApi:
         else:
             return os.path.isfile(GoogleCalendarApi.permission_read_file)
 
-    def get_service(self, info=None, write_access=False):
+    def get_service(self, info=None, write_access=False, claim=True):
+        """ :param claim: Run the OAuth flow if not granted yet. Otherwise raise LookupError then. """
         if info:
             self.controller.info(info)  # strangely, this info is not seen in the status bar
         if write_access:
@@ -436,7 +482,9 @@ class GoogleCalendarApi:
         else:
             self.credential_path = GoogleCalendarApi.permission_read_file
             self.scope = 'https://www.googleapis.com/auth/tasks.readonly'
-        credentials = self.get_credentials()
+        credentials = self.get_credentials(claim)
+        if not credentials:
+            raise LookupError("Google Tasks access not granted yet – add a task from Zim once to grant it")
         http = credentials.authorize(httplib2.Http(timeout=HTTP_TIMEOUT))
         return discovery.build('tasks', 'v1', http=http)
 
@@ -451,6 +499,17 @@ class GoogleCalendarApi:
             raise LookupError(INBOX_MISSING)
         http = credentials.authorize(httplib2.Http(timeout=HTTP_TIMEOUT))
         return discovery.build('sheets', 'v4', http=http)
+
+    def get_inbox_calendar_service(self, claim=False):
+        """ Calendar service for the inbox calendar, with its own credentials (see inbox_calendar_scope).
+            :param claim: see get_inbox_services """
+        self.credential_path = GoogleCalendarApi.permission_inbox_calendar_file
+        self.scope = GoogleCalendarApi.inbox_calendar_scope
+        credentials = self.get_credentials(claim)
+        if not credentials:
+            raise LookupError(INBOX_CALENDAR_MISSING)
+        http = credentials.authorize(httplib2.Http(timeout=HTTP_TIMEOUT))
+        return discovery.build('calendar', 'v3', http=http)
 
     def get_credentials(self, claim=True):
         """Gets valid user credentials from storage.
@@ -705,6 +764,7 @@ class GoogletasksWindow(MainWindowExtension):
                                     <menuitem action='add_new_task'/>
                                     <menuitem action='import_history'/>
                                     <menuitem action='create_inbox'/>
+                                    <menuitem action='create_inbox_calendar'/>
                                     ''' + "\n".join(permissions) + '''
                                     <menu action='choose_task_list'>
                                         <placeholder name='googletasks_lists'/>
@@ -838,18 +898,47 @@ class GoogletasksWindow(MainWindowExtension):
         self.controller.background(job, "inbox")
 
     def _show_inbox(self, url):
-        prompt = INBOX_CLAUDE_PROMPT.format(url=url)
-        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, message_type=Gtk.MessageType.INFO,
-                                   text=_("Inbox sheet is ready"))
-        dialog.format_secondary_text(
+        self._show_inbox_dialog(
+            _("Inbox sheet is ready"), url,
             f"{url}\n\nWhatever is added to its rows gets imported here as a task {INBOX_ICON} at every sync"
             " and deleted from the sheet. Its name, banner and header say so to anyone who opens it.\n\n"
             "To let Claude (e.g. in the mobile app, which reaches the sheet through its Google Drive / Sheets"
             " connector) add tasks there, paste this into its instructions"
-            " (claude.ai / Settings / Profile, or a project's instructions):\n\n" + prompt)
+            " (claude.ai / Settings / Profile, or a project's instructions):\n\n", INBOX_CLAUDE_PROMPT.format(url=url),
+            _("_Open sheet"))
+        return False  # once (GLib.idle_add)
+
+    @action(_('Create inbox _calendar...'))  # T: menu item
+    def create_inbox_calendar(self):
+        """ Create the inbox calendar (or show the one already set) and how to tell Claude about it. """
+        def job():
+            calendar_id = self.controller.create_inbox_calendar()
+            if calendar_id:  # not waited for, the dialog would hold the jobs queued after this one
+                GLib.idle_add(self._show_inbox_calendar, calendar_id)
+        self.controller.background(job, "inbox_calendar")
+
+    def _show_inbox_calendar(self, calendar_id):
+        tasklist = self.controller.preferences["inbox_calendar_tasklist"]
+        self._show_inbox_dialog(
+            _("Inbox calendar is ready"), "https://calendar.google.com/calendar/r",
+            f"Calendar \"{INBOX_CALENDAR_TITLE}\" ({calendar_id}) is in your Google Calendar now. Its events get"
+            " imported here at every sync – as "
+            + (f"Google Tasks of the list {tasklist}" if tasklist else f"tasks {INBOX_ICON}")
+            + " (see File / Properties / Google Tasks) – and deleted from the calendar. The plugin sees no other"
+            " calendar of yours.\n\n"
+            "To let Claude (e.g. in the mobile app, through its Google Calendar connector with the permission"
+            " to create events) add tasks there, paste this into its instructions"
+            " (claude.ai / Settings / Profile, or a project's instructions):\n\n",
+            INBOX_CALENDAR_CLAUDE_PROMPT.format(calendar_id=calendar_id), _("_Open calendar"))
+        return False  # once (GLib.idle_add)
+
+    def _show_inbox_dialog(self, title, url, text, prompt, open_label):
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, message_type=Gtk.MessageType.INFO,
+                                   text=title)
+        dialog.format_secondary_text(text + prompt)
         for label in dialog.get_message_area().get_children():
             label.set_selectable(True)
-        dialog.add_buttons(_("_Copy instructions for Claude"), 1, _("_Open sheet"), 2, _("_Close"),
+        dialog.add_buttons(_("_Copy instructions for Claude"), 1, open_label, 2, _("_Close"),
                            Gtk.ResponseType.CLOSE)
         while True:
             response = dialog.run()
@@ -860,7 +949,6 @@ class GoogletasksWindow(MainWindowExtension):
             else:
                 break
         dialog.destroy()
-        return False  # once (GLib.idle_add)
 
     @action(_('_Sync tasks status from server'))  # T: menu item
     def sync_status(self):
@@ -1539,7 +1627,9 @@ class GoogletasksController:
         """
         if all_history:
             force = True
-        self.import_inbox()  # independent of the tasks, it is not throttled: the sheet should not wait
+        # independent of the tasks, they are not throttled: the inbox should not wait
+        self.import_inbox()
+        self.import_inbox_calendar()
 
         # Set the date since that we fetch the tasks
         cache_exists = self.cache.exists()
@@ -1680,10 +1770,10 @@ class GoogletasksController:
                        " else they are imported again", e, fatal=True)
         return len(texts)
 
-    def _insert_inbox(self, texts):
+    def _insert_inbox(self, texts, source="inbox sheet"):
         page = self._get_page()
         self._store_to_page(insert_after_first_blank_line(page.dump("wiki"), "\n".join(texts) + "\n"), page)
-        self.info(f"New tasks from the inbox sheet: {len(texts)}, page: {page.get_title()}")
+        self.info(f"New tasks from the {source}: {len(texts)}, page: {page.get_title()}")
 
     def create_inbox(self):
         """ Create the inbox sheet and set it in the preferences. If one is set and accessible already,
@@ -1729,15 +1819,140 @@ class GoogletasksController:
         except (httplib2.ServerNotFoundError, OSError, Error, KeyError, IndexError) as e:
             self.error("Cannot create the inbox sheet", e, fatal=True)
             return None
-        on_main(self._set_inbox_sheet, spreadsheet["spreadsheetUrl"])
+        on_main(self._set_preference, "inbox_sheet", spreadsheet["spreadsheetUrl"])
         self.info(f"Inbox sheet created: {spreadsheet['spreadsheetUrl']}")
         return spreadsheet["spreadsheetUrl"]
 
-    def _set_inbox_sheet(self, url):
-        """ Set the inbox sheet in the notebook properties and save them – Zim itself writes notebook.zim
-            only from its Properties dialog, the sheet would be forgotten at the next start. """
-        self.preferences["inbox_sheet"] = url
+    def _set_preference(self, name, value):
+        """ Set the notebook property and save them – Zim itself writes notebook.zim only from its Properties
+            dialog, the inbox sheet/calendar would be forgotten at the next start. """
+        self.preferences[name] = value
         self.notebook.config.write()
+
+    # --- Inbox calendar: events of a calendar the plugin created are imported as tasks and deleted from it ---
+
+    def import_inbox_calendar(self):
+        """ Import the events of the inbox calendar (the `inbox_calendar` preference) as tasks, all of them,
+            the future ones too, and delete them from the calendar. As plain Zim tasks (see get_inbox_text),
+            or as Google Tasks of the list in `inbox_calendar_tasklist`. Does nothing if no calendar is set.
+            Returns the number of events imported (None on error). """
+        calendar_id = (self.preferences["inbox_calendar"] or "").strip()
+        if not calendar_id:
+            return 0
+        try:
+            calendar = self.calendar_api.get_inbox_calendar_service()
+            events, token = [], None
+            while True:
+                response = calendar.events().list(calendarId=calendar_id, pageToken=token,
+                                                  maxResults=2500).execute()
+                events += response.get("items", [])
+                token = response.get("nextPageToken")
+                if not token:
+                    break
+        except LookupError as e:
+            self.error(str(e))
+            return None
+        except (httplib2.ServerNotFoundError, OSError, Error) as e:
+            self.error(INBOX_CALENDAR_MISSING, e)
+            return None
+        if not events:
+            return 0
+        tasklist = (self.preferences["inbox_calendar_tasklist"] or "").strip()
+        if tasklist:
+            texts, done, task_ids = self._inbox_events_to_tasks(events, tasklist)
+        else:
+            texts = [text for text in (get_inbox_text(*get_event_task(e)) for e in events) if text]
+            done, task_ids = events, []
+        if texts:
+            wait_for_notebook(self.notebook)
+            try:
+                on_main(self._insert_inbox, texts, "inbox calendar")
+            except NotebookOperationOngoing as e:
+                if not task_ids:  # the events stay in the calendar, imported next time
+                    self.error("Notebook busy, the inbox calendar will be imported at the next sync", e)
+                    return None
+                # the Google Tasks exist already, the events go; the tasks come with the next import
+                self.error("Notebook busy, the tasks from the inbox calendar will come with the next import", e)
+                task_ids = []
+        if task_ids:  # imported, the import of the task list must not bring them again (see fetch)
+            self.cache.load()
+            self.cache.undated_ids |= set(task_ids)
+            self.cache.save()
+        self._delete_inbox_events(calendar, calendar_id, done)
+        return len(done)
+
+    def _inbox_events_to_tasks(self, events, tasklist):
+        """ Make a Google Task of each event in the task list. Stops at the first failure, the events left
+            are imported next time. Returns (texts of the tasks for the page, events done, task IDs). """
+        texts, done, task_ids = [], [], []
+        try:
+            list_id = self.list_id(tasklist)
+            service = self.calendar_api.get_service(write_access=True, claim=False)
+            for event in events:
+                text, due, note = get_event_task(event)
+                title, notes = " ".join(text.split()), note
+                if not title:
+                    title, notes = " ".join(note.split()), ""
+                if title:
+                    body = {"title": title, "notes": notes} if notes else {"title": title}
+                    if due:
+                        body["due"] = f"{due}T00:00:00.000Z"
+                    task = service.tasks().insert(tasklist=list_id, body=body).execute()
+                    texts.append(self.get_task_text(task, self.preferences["include_start_date"], list_id,
+                                                    self.list_icon(list_id)))
+                    task_ids.append(task["id"])
+                done.append(event)  # (a blank one is just deleted)
+        except LookupError as e:
+            self.error("Cannot make Google Tasks of the inbox calendar", e)
+        except (httplib2.ServerNotFoundError, OSError, Error) as e:
+            self.error("Error in communication while making Google Tasks of the inbox calendar", e)
+        return texts, done, task_ids
+
+    def _delete_inbox_events(self, calendar, calendar_id, events):
+        failed = []
+
+        def deleted(_request_id, _response, exc):
+            if exc and not (isinstance(exc, HttpError) and exc.resp.status in (404, 410)):  # (gone already)
+                failed.append(exc)
+
+        try:
+            for i in range(0, len(events), INBOX_CALENDAR_BATCH):
+                batch = calendar.new_batch_http_request(callback=deleted)
+                for event in events[i:i + INBOX_CALENDAR_BATCH]:
+                    batch.add(calendar.events().delete(calendarId=calendar_id, eventId=event["id"]))
+                batch.execute()
+        except (httplib2.ServerNotFoundError, OSError, Error) as e:
+            failed.append(e)
+        if failed:
+            self.error(f"Tasks imported from the inbox calendar, but {len(failed)} not deleted from it – delete"
+                       " them by hand, else they are imported again", failed[0], fatal=True)
+
+    def create_inbox_calendar(self):
+        """ Create the inbox calendar and set it in the preferences. If one is set and accessible already,
+            just return it. Returns its ID, None on error. """
+        try:
+            calendar = self.calendar_api.get_inbox_calendar_service(claim=True)
+        except Exception as e:  # OAuth flow, missing/invalid client secret, network...
+            self.error("Cannot connect to Google Calendar", e, fatal=True)
+            return None
+        calendar_id = (self.preferences["inbox_calendar"] or "").strip()
+        if calendar_id:
+            try:
+                calendar.calendars().get(calendarId=calendar_id).execute()
+                return calendar_id
+            except (httplib2.ServerNotFoundError, OSError, Error) as e:
+                self.info(f"The inbox calendar set is not accessible, creating a new one: {e}")
+        try:
+            calendar_id = calendar.calendars().insert(body={"summary": INBOX_CALENDAR_TITLE,
+                                                            "description": INBOX_CALENDAR_DESCRIPTION}).execute()["id"]
+        except (httplib2.ServerNotFoundError, OSError, Error, KeyError) as e:
+            self.error("Cannot create the inbox calendar", e, fatal=True)
+            return None
+        on_main(self._set_preference, "inbox_calendar", calendar_id)
+        self.info(f"Inbox calendar created: {calendar_id}")
+        return calendar_id
+
+    # --- (end of inbox calendar) ---
 
     def _store_to_page(self, contents, page):
         """

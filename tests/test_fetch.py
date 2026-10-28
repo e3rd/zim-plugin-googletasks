@@ -98,7 +98,7 @@ def make_controller(gt, monkeypatch, items, cache, page_lines=("Home\n", "\n", "
     controller.window = None
     controller.preferences = {"include_start_date": False, "tasklist": tasklist, "page": "",
                               "include_undated": undated is not None, "include_assigned": True,
-                              "inbox_sheet": ""}
+                              "inbox_sheet": "", "inbox_calendar": ""}
     controller.cache = cache
     cache.lists = lists or {}
     controller.failed = False
