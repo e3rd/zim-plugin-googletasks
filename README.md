@@ -42,6 +42,15 @@ A Google Sheet whose rows get imported as tasks 📥 at every sync (`Import new 
 * To turn it off, empty the `Inbox sheet` property.
 * Needs the **Google Sheets API** enabled in the Google Cloud project of the client secret (else the plugin says so, with a link to enable it).
 
+### Inbox calendar: tasks from your phone's calendar or Claude (optional, off by default)
+The same idea as the inbox sheet (both may be on at once), but a Google Calendar: what waits for Zim is seen in the calendar on the phone, among your other events, and is quick to add there.
+* `Tools / Google Tasks / Create inbox calendar...` – asks for one more permission in the browser: to create calendars and manage the events in them. The plugin sees **only the calendars it created itself**, your other calendars do not exist for it (reading, changing or deleting them ends with "not found"). Creates the calendar `Zim inbox` and sets it in `File / Properties / Google Tasks / Inbox calendar`.
+* At every sync, all its events are imported – the future ones too – and deleted from the calendar. The day of the event becomes the due date, the time of a timed event follows the text, the description goes to the next line(s). A repeated event is imported once (with its rule) and deleted, all its repetitions with it.
+* `Inbox calendar: make Google Tasks of its events in this list` – empty: plain Zim tasks 📥 like from the sheet; a list title (or `@default`): each event becomes a Google Task of that list (needs the write access to Google Tasks), so it is seen in Google Tasks, too, and its checkbox syncs.
+* The dialog shows a ready-made instruction for Claude, whose Google Calendar connector then creates the events (it needs the permission to create events; in claude.ai you may allow it just that tool without asking).
+* Needs the **Google Calendar API** enabled in the Google Cloud project of the client secret.
+* Measured: an import of the calendar takes ~0.7 s, of the sheet ~2 s.
+
 ### Optional
 If you want to synchronise automatically, I recommend using `anacron`. This line helps me get synchronised at 7:30 AM or 5 minutes after computer launch (Ubuntu 17.04) even without restarting Zim:
 ```bash
