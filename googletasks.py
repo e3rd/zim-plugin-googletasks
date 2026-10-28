@@ -179,11 +179,6 @@ INBOX_CALENDAR_CLAUDE_PROMPT = (
     " (today if none), description = optional details. Only create events there, never edit or delete them.")
 INBOX_CALENDAR_BATCH = 50
 "events deleted in one batch request (the Calendar API takes up to 50)"
-INBOX_EVENT_NOTE = "📅 event "
-"the last line of the notes of a Google Task made of an inbox calendar event, followed by the event ID"
-inboxEventNoteRe = re.compile(r"\n?" + INBOX_EVENT_NOTE + r"([\w-]+)\Z")
-INBOX_CALENDAR_MADE_DAYS = 30
-"how far back the Google Tasks made of inbox calendar events are looked for, see _inbox_tasks_made"
 sheetIdRe = re.compile(r'/spreadsheets/d/([\w-]+)')
 htmlLinkRe = re.compile(r'<a\s[^>]*href="([^"]*)"[^>]*>(.*?)</a>', re.I | re.S)
 activationUrlRe = re.compile(r'https://console\.(?:developers|cloud)\.google\.com/\S+?(?=["\s]|$)')
@@ -1572,9 +1567,8 @@ class GoogletasksController:
         if include_due and task.get("due"):
             d = GoogletasksController.get_time(mode="date-only", from_string=task['due'])
             s += " _{//>" + d + "//}"
-        notes = inboxEventNoteRe.sub("", task.get("notes") or "")  # (only for the deduplication)
-        if notes:  # insert other lines
-            s += "\n" + notes
+        if task.get("notes"):  # insert other lines
+            s += "\n" + task["notes"]
         return s
 
     @staticmethod
@@ -1918,13 +1912,16 @@ class GoogletasksController:
                 on_main(self._insert_inbox, texts, "inbox calendar")
             except NotebookOperationOngoing as e:
                 # the events stay in the calendar, imported next time (their Google Tasks are not made twice,
-                # see _inbox_tasks_made); those whose tasks come with the import of the list go
+                # see Cache.inbox_tasks); those whose tasks come with the import of the list go
                 self.error("Notebook busy, the inbox calendar will be imported at the next sync", e)
                 self._delete_inbox_events(calendar, calendar_id, passed)
                 return None
         if task_ids:  # imported, the import of the task list must not bring them again (see fetch)
             self.cache.load()
             self.cache.items_ids |= set(task_ids)
+            for task in self.cache.inbox_tasks.values():
+                if task["id"] in task_ids:
+                    task["in_page"] = True  # (should its event not be deleted)
             self.cache.save()
         self._delete_inbox_events(calendar, calendar_id, done)
         return len(done)
@@ -1936,23 +1933,25 @@ class GoogletasksController:
             Returns (texts of the tasks for the page, events done, IDs of the tasks for the page,
             events done whose tasks come with the import). """
         texts, done, task_ids, passed = [], [], [], []
+        self.cache.load()
+        ids = {event["id"] for event in events}  # (an event deleted by hand meanwhile is forgotten)
+        made = self.cache.inbox_tasks = {k: v for k, v in self.cache.inbox_tasks.items() if k in ids}
         try:
             list_id = self.list_id(tasklist)
             service = self.calendar_api.get_service(write_access=True, claim=False)
-            made = self._inbox_tasks_made(service, list_id)
             imported = self._is_imported_list(list_id)
             today = datetime.date.today().isoformat()
             for event in events:
                 title, due, notes = get_event_task(event)
                 task = made.get(event["id"])
                 if not task:
-                    body = {"title": title, "notes": "\n".join(filter(None, (notes, INBOX_EVENT_NOTE + event["id"])))}
+                    body = {"title": title, **({"notes": notes} if notes else {})}
                     if due:
                         body["due"] = f"{due}T00:00:00.000Z"
-                    task = service.tasks().insert(tasklist=list_id, body=body).execute()
+                    task = made[event["id"]] = service.tasks().insert(tasklist=list_id, body=body).execute()
                 if imported and due > today:
                     passed.append(event)
-                else:  # with the date, even when the dates are not included, it may be a past one
+                elif not task.get("in_page"):  # with the date, even when the dates are not included, it may be past
                     shown = {**task, "title": task["title"] + (f" _{{//<{due}//}}" if due else "")}
                     texts.append(self.get_task_text(shown, False, list_id, self.list_icon(list_id)))
                     task_ids.append(task["id"])
@@ -1961,25 +1960,8 @@ class GoogletasksController:
             self.error("Cannot make Google Tasks of the inbox calendar", e)
         except (httplib2.ServerNotFoundError, OSError, Error) as e:
             self.error("Error in communication while making Google Tasks of the inbox calendar", e)
+        self.cache.save()
         return texts, done, task_ids, passed
-
-    def _inbox_tasks_made(self, service, list_id):
-        """ {event ID: task} of the tasks of the list made of inbox calendar events lately (see INBOX_EVENT_NOTE),
-            so that an event not deleted after its task was made (a network failure, a busy notebook) does not
-            make another one. """
-        since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=INBOX_CALENDAR_MADE_DAYS)
-        made, token = {}, None
-        while True:
-            response = service.tasks().list(tasklist=list_id, updatedMin=since.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-                                            showCompleted=True, showHidden=True, maxResults=100,
-                                            pageToken=token).execute()
-            for task in response.get("items", []):
-                match = inboxEventNoteRe.search(task.get("notes") or "")
-                if match:
-                    made[match[1]] = task
-            token = response.get("nextPageToken")
-            if not token:
-                return made
 
     def _is_imported_list(self, list_id):
         """ Whether the import of tasks reads the list, i.e. it is a chosen one ('@default' = the default list,
@@ -1991,20 +1973,28 @@ class GoogletasksController:
         return any(real(self.cache.lists.get(title, title)) == real(list_id) for title, _icon in self.tasklists)
 
     def _delete_inbox_events(self, calendar, calendar_id, events):
-        failed = []
+        failed, gone = [], []
 
-        def deleted(_request_id, _response, exc):
+        def deleted(event_id, _response, exc):
             if exc and not (isinstance(exc, HttpError) and exc.resp.status in (404, 410)):  # (gone already)
                 failed.append(exc)
+            else:
+                gone.append(event_id)
 
         try:
             for i in range(0, len(events), INBOX_CALENDAR_BATCH):
                 batch = calendar.new_batch_http_request(callback=deleted)
                 for event in events[i:i + INBOX_CALENDAR_BATCH]:
-                    batch.add(calendar.events().delete(calendarId=calendar_id, eventId=event["id"]))
+                    batch.add(calendar.events().delete(calendarId=calendar_id, eventId=event["id"]),
+                              request_id=event["id"])
                 batch.execute()
         except (httplib2.ServerNotFoundError, OSError, Error) as e:
             failed.append(e)
+        self.cache.load()
+        if self.cache.inbox_tasks.keys() & set(gone):
+            for event_id in gone:
+                self.cache.inbox_tasks.pop(event_id, None)
+            self.cache.save()
         if failed:
             self.error(f"Tasks imported from the inbox calendar, but {len(failed)} not deleted from it – delete"
                        " them by hand, else they are imported again", failed[0], fatal=True)
@@ -2161,6 +2151,10 @@ class Cache:
         "{title: id}"
         self.icons = {}
         "{title: icon} of every list ever chosen, kept when the list is unchosen"
+        self.inbox_tasks = {}
+        """ {event ID: Google Task} made of an inbox calendar event not deleted yet, so that it is not made twice
+            when the deleting fails or the notebook is busy (the events are kept then). `in_page` is set in the task
+            once it is in the page. """
         self.last_fetched = 0
         "get initial datetime"
 
@@ -2184,7 +2178,8 @@ class Cache:
             except (OSError, ValueError) as e:  # ValueError: json errors, bad encoding
                 logger.warning("Cannot read cache %s, starting with an empty one: %s", self._path, e)
                 data, migrated = None, False
-            data = data or {"items_ids": set(), "undated_ids": set(), "lists": {}, "icons": {}, "last_fetched": 0}
+            data = data or {"items_ids": set(), "undated_ids": set(), "lists": {}, "icons": {}, "inbox_tasks": {},
+                            "last_fetched": 0}
             self.__dict__.update(data)
             self._mtime = mtime
             if migrated:
@@ -2196,7 +2191,8 @@ class Cache:
         """ Cache file content -> ({items_ids, lists, last_fetched}, migrated) or (None, False) if unusable.
 
         Current format: {"version": 1, "items_ids": [...], "undated_ids": [...], "lists": {...}, "icons": {...},
-         "last_fetched": float}. (`undated_ids` and `icons` were added later, a file without them is fine.)
+         "inbox_tasks": {...}, "last_fetched": float}. (`undated_ids`, `icons` and `inbox_tasks` were added later,
+         a file without them is fine.)
         Old format (no "version") was written by jsonpickle: plain JSON as well, only the set of IDs
         is wrapped as {"py/set": [...]}, and the timestamp may be called `date_at` in even older files.
         We read it as plain JSON so that already imported tasks are not imported again and
@@ -2218,6 +2214,9 @@ class Cache:
         icons = raw.get("icons", {})
         if not isinstance(icons, dict):
             icons = {}
+        inbox_tasks = raw.get("inbox_tasks", {})
+        if not isinstance(inbox_tasks, dict):
+            inbox_tasks = {}
         undated = raw.get("undated_ids", [])
         if not isinstance(undated, list):
             undated = []
@@ -2229,6 +2228,8 @@ class Cache:
                 "undated_ids": {i for i in undated if isinstance(i, str)},
                 "lists": {k: v for k, v in lists.items() if isinstance(k, str) and isinstance(v, str)},
                 "icons": {k: v for k, v in icons.items() if isinstance(k, str) and isinstance(v, str)},
+                "inbox_tasks": {k: v for k, v in inbox_tasks.items() if isinstance(v, dict)
+                                and isinstance(v.get("id"), str) and isinstance(v.get("title"), str)},
                 "last_fetched": last_fetched}, migrated
 
     def save(self):
@@ -2237,6 +2238,7 @@ class Cache:
                 "undated_ids": sorted(self.undated_ids),
                 "lists": self.lists,
                 "icons": self.icons,
+                "inbox_tasks": self.inbox_tasks,
                 "last_fetched": self.last_fetched}
         tmp = self._path.with_name(self._path.name + ".tmp")
         tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")

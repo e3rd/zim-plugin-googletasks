@@ -14,6 +14,7 @@ def test_roundtrip(gt, cache_path):
     cache.lists = {"Work": "id1"}
     cache.icons = {"Work": "💼"}
     cache.undated_ids = {"u"}
+    cache.inbox_tasks = {"e1": {"id": "t1", "title": "Alpha", "in_page": True}}
     cache.touch_save()
     data = json.loads(cache_path.read_text())
     assert data["version"] == gt.CACHE_SCHEMA_VERSION
@@ -25,6 +26,7 @@ def test_roundtrip(gt, cache_path):
     assert loaded.last_fetched == cache.last_fetched
     assert loaded.icons == {"Work": "💼"}
     assert loaded.undated_ids == {"u"}
+    assert loaded.inbox_tasks == {"e1": {"id": "t1", "title": "Alpha", "in_page": True}}
 
 
 def test_old_jsonpickle_format_is_migrated_and_resaved(gt, cache_path):

@@ -23,7 +23,8 @@ class Batch:
     def __init__(self, calendar, callback):
         self.calendar, self.callback, self.requests = calendar, callback, []
 
-    def add(self, request):
+    def add(self, request, request_id=None):
+        assert request_id == request.event_id
         self.requests.append(request)
 
     def execute(self):
@@ -73,15 +74,9 @@ class FakeCalendar:
 class FakeTasks:
     def __init__(self, error=None):
         self.created, self.error = [], error
-        self.existing = []
-        "tasks on the server before the import"
 
     def tasks(self):
         return self
-
-    def list(self, tasklist, updatedMin, showCompleted, showHidden, maxResults, pageToken=None):
-        assert showCompleted and showHidden
-        return Request({"items": self.existing})
 
     def insert(self, tasklist, body):
         if self.error and len(self.created) == 1:
@@ -170,14 +165,15 @@ def test_events_become_google_tasks_of_the_list(gt):
                         tasklist="Work")
     assert c.import_inbox_calendar() == 2
     assert c.tasks_service.created == [
-        ("L1", {"title": "Alpha", "notes": "note\n📅 event e1", "due": f"{TODAY}T00:00:00.000Z"}),
-        ("L1", {"title": "Beta", "notes": "📅 event e2", "due": "2026-01-05T00:00:00.000Z"})]
+        ("L1", {"title": "Alpha", "notes": "note", "due": f"{TODAY}T00:00:00.000Z"}),
+        ("L1", {"title": "Beta", "due": "2026-01-05T00:00:00.000Z"})]
     page = c.notebook.page.parsed
-    # the date even when the dates are not included; the event ID is not shown
+    # the date even when the dates are not included
     assert f"|💼]] Alpha _{{//<{TODAY}//}}\nnote\n" in page and "|💼]] Beta _{//<2026-01-05//}\n" in page
     assert c.cache.items_ids == {"t0", "t1"}  # the import of the list will not bring them again
     assert c.cache.undated_ids == set()
     assert c.calendar.batches == [["e1", "e2"]]
+    assert c.cache.inbox_tasks == {}  # events deleted, nothing to remember
 
 
 def test_future_event_just_passes_to_google_tasks(gt):
@@ -213,15 +209,26 @@ def test_default_list_is_known_under_its_title(gt, chosen, target, passes):
     assert ("Beta" not in (c.notebook.page.parsed or "")) == passes
 
 
-def test_task_made_already_is_not_made_twice(gt):
-    """ The event was not deleted last time (network failure, busy notebook), its task exists. """
-    c = make_controller(gt, [[event("e1", "Alpha"), event("e2", "Beta")]], tasklist="Work")
-    c.tasks_service.existing = [{"id": "old", "title": "Alpha", "notes": "📅 event e1"},
-                                {"id": "other", "title": "Gamma", "notes": "no event"}]
+def test_failed_delete_makes_neither_task_nor_line_twice(gt):
+    """ The task is in the page already, its event stayed in the calendar. """
+    c = make_controller(gt, [[event("e1", "Alpha"), event("e2", "Beta")]], tasklist="Work",
+                        delete_errors={"e1": gt.Error("500")})
     assert c.import_inbox_calendar() == 2
-    assert [body["title"] for _l, body in c.tasks_service.created] == ["Beta"]
+    assert c.failed
+    assert list(c.cache.inbox_tasks) == ["e1"] and c.cache.inbox_tasks["e1"]["in_page"]
+    c.calendar.pages, c.calendar.delete_errors = [[event("e1", "Alpha")]], {}
+    assert c.import_inbox_calendar() == 1
+    assert len(c.tasks_service.created) == 2
     assert c.notebook.page.parsed.count("Alpha") == 1
-    assert c.cache.items_ids == {"old", "t0"}
+    assert c.calendar.batches[-1] == ["e1"]
+    assert c.cache.inbox_tasks == {}
+
+
+def test_event_gone_meanwhile_is_forgotten(gt):
+    c = make_controller(gt, [[event("e2", "Beta")]], tasklist="Work")
+    c.cache.inbox_tasks = {"e1": {"id": "old", "title": "Alpha"}}
+    assert c.import_inbox_calendar() == 1
+    assert c.cache.inbox_tasks == {}
 
 
 def test_repeated_events_are_left_in_the_calendar(gt):
@@ -293,14 +300,23 @@ def test_busy_notebook_leaves_page_and_events(gt):
 
 
 def test_busy_notebook_with_google_tasks_keeps_the_events_for_the_page(gt):
-    """ Their tasks exist on the server already, found next time (see test_task_made_already_is_not_made_twice).
+    """ Their tasks exist on the server already, they come into the page next time without being made again.
         The future ones go, the import brings them. """
     c = make_controller(gt, [[event("e1", "Alpha"), event("e2", "Beta", LATER)]], tasklist="Work")
     c.notebook.operation = types.SimpleNamespace(message="Updating index")
     assert c.import_inbox_calendar() is None
     assert c.calendar.batches == [["e2"]]
     assert c.cache.items_ids == set()
+    assert list(c.cache.inbox_tasks) == ["e1"]
     assert c.failed
+
+    c.notebook.operation = None
+    c.calendar.pages = [[event("e1", "Alpha")]]
+    assert c.import_inbox_calendar() == 1
+    assert len(c.tasks_service.created) == 2  # Alpha once, Beta
+    assert "Alpha" in c.notebook.page.parsed
+    assert c.cache.items_ids == {"t0"}
+    assert c.cache.inbox_tasks == {}
 
 
 def test_create_reuses_the_calendar_set(gt):

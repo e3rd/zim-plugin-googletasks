@@ -9,6 +9,7 @@ class FakeCache:
     def __init__(self, items_ids=(), exists=True):
         self.items_ids = set(items_ids)
         self.undated_ids = set()
+        self.inbox_tasks = {}
         self._exists = exists
         self.saved = 0
         self.last_fetched = datetime.datetime.now().timestamp() - 86400
