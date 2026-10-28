@@ -51,7 +51,7 @@ except RuntimeError:
         pass
 
     ErrorDialog = None
-from zim.formats import CHECKED_BOX, UNCHECKED_BOX
+from zim.formats import CHECKED_BOX, UNCHECKED_BOX, XCHECKED_BOX, MIGRATED_BOX, TRANSMIGRATED_BOX
 from zim.main import NotebookCommand
 from zim.main.command import GtkCommand
 from zim.notebook import build_notebook, Path as ZimPath
@@ -596,6 +596,20 @@ class Worker:
             logger.debug("Cannot set the window title: %s", e)
 
 
+CHECKBOXES = (UNCHECKED_BOX, CHECKED_BOX, XCHECKED_BOX, MIGRATED_BOX, TRANSMIGRATED_BOX)
+
+
+def ends_task(buffer, line):
+    """ True if the line no longer belongs to the task above it (see send_as_task): there is no such line,
+        or it is blank, a heading or another task – any checkbox, ours (whatever its list icon) or Zim's own.
+        A bulleted line is a part of the task (a note). """
+    if line >= buffer.get_line_count():
+        return True
+    text = _line_text(buffer, line)
+    return (not text.strip() or buffer.get_bullet(line) in CHECKBOXES or TASK_ANCHOR_SYMBOL in text
+            or bool(buffer.get_heading_text(buffer.get_iter_at_line(line))))
+
+
 def _line_text(buffer, line):
     """ Plain text of a single line of a Gtk.TextBuffer, without the trailing newline. """
     start = buffer.get_iter_at_line(line)
@@ -760,21 +774,11 @@ class GoogletasksWindow(MainWindowExtension):
         buffer = self.window.pageview.textview.get_buffer()
 
         if not buffer.get_selection_bounds():
-            # no text is selected yet - we try to detect and auto-select a task
+            # no text is selected yet - we try to detect and auto-select a task: its line and the ones below it
             line_i = buffer.get_insert_iter().get_line()
             start_iter = buffer.get_iter_at_line(line_i)
-
-            while True:
+            while not ends_task(buffer, line_i + 1):
                 line_i += 1
-                s = None
-                try:
-                    s = self.controller.readline(line_i, buffer)
-                finally:
-                    if (not s or not s.strip() or s.startswith("\n") or
-                            s.startswith("\xef\xbf\xbc ") or  # begins with a checkbox
-                            TASK_ANCHOR_SYMBOL in s):
-                        line_i -= 1
-                        break
 
             end_iter = buffer.get_iter_at_line(line_i)
             end_iter.forward_to_line_end()

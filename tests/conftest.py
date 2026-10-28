@@ -69,7 +69,8 @@ def load_plugin_module(tmp_path, monkeypatch):
     _module("zim.actions", action=lambda *a, **k: (lambda f: f), get_gtk_actiongroup=None, ActionClassMethod=_Anything)
     _module("zim.config", XDG_DATA_HOME=_Folder(tmp_path / "data"), XDG_CONFIG_HOME=_Folder(tmp_path / "config"),
             ConfigManager=_Anything)
-    _module("zim.formats", get_dumper=None, CHECKED_BOX="checked", UNCHECKED_BOX="unchecked")
+    _module("zim.formats", get_dumper=None, CHECKED_BOX="checked", UNCHECKED_BOX="unchecked", XCHECKED_BOX="xchecked",
+            MIGRATED_BOX="migrated", TRANSMIGRATED_BOX="transmigrated")
     _module("zim.formats.wiki", Parser=_Anything)
     _module("zim.gui")
     _module("zim.gui.widgets", Dialog=_Anything, InputEntry=_Anything, ErrorDialog=_Anything)
