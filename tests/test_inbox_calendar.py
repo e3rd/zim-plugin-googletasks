@@ -1,4 +1,5 @@
 """Inbox calendar: its events are imported as tasks (plain Zim ones or Google Tasks) and deleted from it."""
+import datetime
 import time
 import types
 
@@ -8,9 +9,12 @@ from test_fetch import FakeCache, FakeNotebook, FakePage
 from test_inbox import Request
 
 CAL = "c_abc@group.calendar.google.com"
+TODAY = datetime.date.today().isoformat()
+LATER = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
+"a future event, the Google Task made of it is not put into the page"
 
 
-def event(event_id, summary="", date="2026-10-28", **kwargs):
+def event(event_id, summary="", date=TODAY, **kwargs):
     start = {"dateTime": date} if "T" in date else {"date": date}
     return {"id": event_id, "summary": summary, "start": start, **kwargs}
 
@@ -69,9 +73,15 @@ class FakeCalendar:
 class FakeTasks:
     def __init__(self, error=None):
         self.created, self.error = [], error
+        self.existing = []
+        "tasks on the server before the import"
 
     def tasks(self):
         return self
+
+    def list(self, tasklist, updatedMin, showCompleted, showHidden, maxResults, pageToken=None):
+        assert showCompleted and showHidden
+        return Request({"items": self.existing})
 
     def insert(self, tasklist, body):
         if self.error and len(self.created) == 1:
@@ -108,23 +118,43 @@ def prague(monkeypatch):
 
 
 @pytest.mark.parametrize("ev, expected", [
-    (event("1", "Call Bob"), ("Call Bob", "2026-10-28", "")),
-    (event("1", "Call Bob", "2026-10-30T14:05:00+01:00"), ("Call Bob 14:05", "2026-10-30", "")),
-    (event("1", "Call Bob", "2026-10-29T23:30:00Z"), ("Call Bob 00:30", "2026-10-30", "")),  # UTC calendar
-    (event("1", "Call Bob", description='about <b>the roof</b><br>see <a href="https://x.cz/a">offer</a> &amp; bill'),
+    (event("1", "Call Bob", "2026-10-28"), ("Call Bob", "2026-10-28", "")),
+    (event("1", "Call Bob", "2026-10-30T14:05:00+01:00"), ("14:05 Call Bob", "2026-10-30", "")),
+    (event("1", "Call Bob", "2026-10-29T23:30:00Z"), ("00:30 Call Bob", "2026-10-30", "")),  # UTC calendar
+    (event("1", "Call Bob", "2026-10-30T14:05:00Z", end={"dateTime": "2026-10-30T15:30:00Z"}),
+     ("15:05–16:30 Call Bob", "2026-10-30", "")),
+    (event("1", "Trip", "2026-10-30T14:00:00Z", end={"dateTime": "2026-11-02T09:00:00Z"}),
+     ("15:00 Trip (until 2026-11-02 10:00)", "2026-10-30", "")),
+    (event("1", "Holiday", "2026-10-30", end={"date": "2026-11-03"}), ("Holiday (until 2026-11-02)", "2026-10-30", "")),
+    (event("1", "Day off", "2026-10-30", end={"date": "2026-10-31"}), ("Day off", "2026-10-30", "")),
+    (event("1", "Call Bob", "2026-10-28",
+           description='about <b>the roof</b><br>see <a href="https://x.cz/a">offer</a> &amp; bill'),
      ("Call Bob", "2026-10-28", "about the roof\nsee offer https://x.cz/a & bill")),
-    (event("1", "Gym", recurrence=["RRULE:FREQ=WEEKLY"]), ("Gym", "2026-10-28", "repeats: RRULE:FREQ=WEEKLY")),
+    (event("1", "Meeting", "2026-10-28", location="Room 5", hangoutLink="https://meet.google.com/a-b-c"),
+     ("Meeting", "2026-10-28", "Room 5\nhttps://meet.google.com/a-b-c")),
+    (event("1", "Call", "2026-10-28", conferenceData={"entryPoints": [
+        {"entryPointType": "phone", "uri": "tel:+420"}, {"entryPointType": "video", "uri": "https://zoom.us/j/1"}]}),
+     ("Call", "2026-10-28", "https://zoom.us/j/1")),
+    (event("1", "", "2026-10-30T14:05:00Z", description="only a note"), ("15:05 only a note", "2026-10-30", "")),
+    (event("1", "", "2026-10-28"), ("(no title)", "2026-10-28", "")),
 ])
 def test_event_task(gt, ev, expected, prague):
     assert gt.get_event_task(ev) == expected
 
 
+def test_zim_task_of_a_future_event_starts_on_its_day(gt):
+    """ The Zim Task List keeps it hidden till then. """
+    assert gt.get_inbox_text("Alpha", TODAY, start_at_due=True) == f"[ ] 📥 Alpha _{{//<{TODAY}//}}"
+    assert gt.get_inbox_text("Alpha", LATER, start_at_due=True) == f"[ ] 📥 Alpha _{{//>{LATER} <{LATER}//}}"
+    assert gt.get_inbox_text("Alpha", LATER) == f"[ ] 📥 Alpha _{{//<{LATER}//}}"  # the inbox sheet
+
+
 def test_imports_all_events_as_zim_tasks_and_deletes_them(gt):
     c = make_controller(gt, [[event("e1", "Alpha"), event("e2", "", description="only a note")],
-                             [event("e3", "Beta", "2027-01-05")]])
+                             [event("e3", "Beta", LATER)]])
     assert c.import_inbox_calendar() == 3
-    assert c.notebook.page.parsed == ("Home\n\n[ ] 📥 Alpha _{//<2026-10-28//}\n[ ] 📥 only a note _{//<2026-10-28//}\n"
-                                      "[ ] 📥 Beta _{//<2027-01-05//}\nexisting\n")
+    assert c.notebook.page.parsed == (f"Home\n\n[ ] 📥 Alpha _{{//<{TODAY}//}}\n[ ] 📥 only a note _{{//<{TODAY}//}}\n"
+                                      f"[ ] 📥 Beta _{{//>{LATER} <{LATER}//}}\nexisting\n")
     assert c.calendar.batches == [["e1", "e2", "e3"]]
     assert not c.failed
 
@@ -136,15 +166,71 @@ def test_deletes_in_batches_of_50(gt):
 
 
 def test_events_become_google_tasks_of_the_list(gt):
-    c = make_controller(gt, [[event("e1", "Alpha", description="note"), event("e2", "Beta", "2027-01-05")]],
+    c = make_controller(gt, [[event("e1", "Alpha", description="note"), event("e2", "Beta", "2026-01-05")]],
                         tasklist="Work")
     assert c.import_inbox_calendar() == 2
-    assert c.tasks_service.created == [("L1", {"title": "Alpha", "notes": "note", "due": "2026-10-28T00:00:00.000Z"}),
-                                       ("L1", {"title": "Beta", "due": "2027-01-05T00:00:00.000Z"})]
+    assert c.tasks_service.created == [
+        ("L1", {"title": "Alpha", "notes": "note\n📅 event e1", "due": f"{TODAY}T00:00:00.000Z"}),
+        ("L1", {"title": "Beta", "notes": "📅 event e2", "due": "2026-01-05T00:00:00.000Z"})]
     page = c.notebook.page.parsed
-    assert "|💼]] Alpha\nnote\n" in page and "|💼]] Beta\n" in page
-    assert c.cache.undated_ids == {"t0", "t1"}  # the import of the list will not bring them again
+    # the date even when the dates are not included; the event ID is not shown
+    assert f"|💼]] Alpha _{{//<{TODAY}//}}\nnote\n" in page and "|💼]] Beta _{//<2026-01-05//}\n" in page
+    assert c.cache.items_ids == {"t0", "t1"}  # the import of the list will not bring them again
+    assert c.cache.undated_ids == set()
     assert c.calendar.batches == [["e1", "e2"]]
+
+
+def test_future_event_just_passes_to_google_tasks(gt):
+    """ Not put into the page now, the import of the list brings it when due. """
+    c = make_controller(gt, [[event("e1", "Alpha"), event("e2", "Beta", LATER)]], tasklist="Work")
+    assert c.import_inbox_calendar() == 2
+    assert [body["due"] for _l, body in c.tasks_service.created] == [f"{TODAY}T00:00:00.000Z",
+                                                                     f"{LATER}T00:00:00.000Z"]
+    assert "Alpha" in c.notebook.page.parsed and "Beta" not in c.notebook.page.parsed
+    assert c.cache.items_ids == {"t0"}
+    assert c.calendar.batches == [["e1", "e2"]]
+
+
+def test_future_event_of_a_list_not_imported_goes_to_the_page(gt):
+    """ The import does not read the list, it would never bring it. """
+    c = make_controller(gt, [[event("e1", "Beta", LATER)]], tasklist="Other")
+    c.cache.lists["Other"] = "L2"
+    assert c.import_inbox_calendar() == 1
+    assert f"Beta _{{//<{LATER}//}}" in c.notebook.page.parsed
+    assert c.cache.items_ids == {"t0"}
+
+
+@pytest.mark.parametrize("chosen, target, passes", [
+    ("@default", "@default", True),
+    ("My Tasks", "@default", True),  # My Tasks is the default list, first in the cache
+    ("@default", "My Tasks", True),
+    ("Work", "@default", False),
+])
+def test_default_list_is_known_under_its_title(gt, chosen, target, passes):
+    c = make_controller(gt, [[event("e1", "Beta", LATER)]], tasklist=target)
+    c.preferences["tasklist"] = chosen
+    c.import_inbox_calendar()
+    assert ("Beta" not in (c.notebook.page.parsed or "")) == passes
+
+
+def test_task_made_already_is_not_made_twice(gt):
+    """ The event was not deleted last time (network failure, busy notebook), its task exists. """
+    c = make_controller(gt, [[event("e1", "Alpha"), event("e2", "Beta")]], tasklist="Work")
+    c.tasks_service.existing = [{"id": "old", "title": "Alpha", "notes": "📅 event e1"},
+                                {"id": "other", "title": "Gamma", "notes": "no event"}]
+    assert c.import_inbox_calendar() == 2
+    assert [body["title"] for _l, body in c.tasks_service.created] == ["Beta"]
+    assert c.notebook.page.parsed.count("Alpha") == 1
+    assert c.cache.items_ids == {"old", "t0"}
+
+
+def test_repeated_events_are_left_in_the_calendar(gt):
+    c = make_controller(gt, [[event("e1", "Alpha"), event("e2", "Gym", recurrence=["RRULE:FREQ=WEEKLY"]),
+                              event("e3_20261030", "Gym moved", recurringEventId="e3")]])
+    assert c.import_inbox_calendar() == 1
+    assert "Gym" not in c.notebook.page.parsed
+    assert c.calendar.batches == [["e1"]]
+    assert c.failed  # reported
 
 
 def test_failed_task_creation_keeps_the_events_left(gt):
@@ -206,13 +292,14 @@ def test_busy_notebook_leaves_page_and_events(gt):
     assert c.failed
 
 
-def test_busy_notebook_with_google_tasks_still_deletes_events(gt):
-    """ The tasks exist on the server already: kept events would make them twice, the import brings them. """
-    c = make_controller(gt, [[event("e1", "Alpha")]], tasklist="Work")
+def test_busy_notebook_with_google_tasks_keeps_the_events_for_the_page(gt):
+    """ Their tasks exist on the server already, found next time (see test_task_made_already_is_not_made_twice).
+        The future ones go, the import brings them. """
+    c = make_controller(gt, [[event("e1", "Alpha"), event("e2", "Beta", LATER)]], tasklist="Work")
     c.notebook.operation = types.SimpleNamespace(message="Updating index")
-    c.import_inbox_calendar()
-    assert c.calendar.batches == [["e1"]]
-    assert c.cache.undated_ids == set()
+    assert c.import_inbox_calendar() is None
+    assert c.calendar.batches == [["e2"]]
+    assert c.cache.items_ids == set()
     assert c.failed
 
 

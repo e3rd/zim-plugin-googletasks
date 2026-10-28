@@ -145,6 +145,9 @@ SOURCE_ARROW = "↗"
 sourceLinkRe = re.compile(r'\[\[(https?://[^|\]]+)\|(📄|💬|📧|📝|🔗)' + SOURCE_ARROW + r'?\]\]\s*')
 """ A link to where the task comes from, see SOURCE_ICONS: 1 URL, 2 icon. """
 start_date_in_title = re.compile(r'(.*)>(\d{4}-\d{2}(-\d{2})?)(.*)')  # (_\{//)?  (//})?
+dateMarkupRe = re.compile(r'\s*_\{//((?:\s*[<>] ?\d{4}-\d{2}-\d{2})+)\s*//\}')
+""" Dates in small markup, as the inbox writes them: `_{//<2026-11-11//}`, `_{//>2026-11-11 <2026-11-11//}` """
+checkboxRe = re.compile(r'^\[[ *x<>]\] ')
 INVALID_DAY = "N/A"
 HTTP_TIMEOUT = 30
 "seconds; without it, a dead network would keep a job (and the jobs queued after it) waiting forever"
@@ -176,6 +179,11 @@ INBOX_CALENDAR_CLAUDE_PROMPT = (
     " (today if none), description = optional details. Only create events there, never edit or delete them.")
 INBOX_CALENDAR_BATCH = 50
 "events deleted in one batch request (the Calendar API takes up to 50)"
+INBOX_EVENT_NOTE = "📅 event "
+"the last line of the notes of a Google Task made of an inbox calendar event, followed by the event ID"
+inboxEventNoteRe = re.compile(r"\n?" + INBOX_EVENT_NOTE + r"([\w-]+)\Z")
+INBOX_CALENDAR_MADE_DAYS = 30
+"how far back the Google Tasks made of inbox calendar events are looked for, see _inbox_tasks_made"
 sheetIdRe = re.compile(r'/spreadsheets/d/([\w-]+)')
 htmlLinkRe = re.compile(r'<a\s[^>]*href="([^"]*)"[^>]*>(.*?)</a>', re.I | re.S)
 activationUrlRe = re.compile(r'https://console\.(?:developers|cloud)\.google\.com/\S+?(?=["\s]|$)')
@@ -233,10 +241,12 @@ def parse_inbox_rows(values):
             for index, row in enumerate(values[INBOX_HEADER_ROWS:], INBOX_HEADER_ROWS)]
 
 
-def get_inbox_text(text, due="", note=""):
+def get_inbox_text(text, due="", note="", start_at_due=False):
     """ Zim markup of a task from the inbox sheet: a plain Zim task (it does not live in Google Tasks),
         the due date in the Zim notation `<2026-10-28`, the note on the next line(s), as Google Tasks notes are.
-        A row with only a note takes the note as its text. None for a blank row. """
+        A row with only a note takes the note as its text. None for a blank row.
+        :param start_at_due: A future due date is the start date as well (`>2026-11-11 <2026-11-11`), so that
+                             the Zim Task List keeps the task hidden till then. """
     text, note = " ".join(text.split()), note.strip()
     if not text:
         text, note = " ".join(note.split()), ""
@@ -245,8 +255,9 @@ def get_inbox_text(text, due="", note=""):
     s = f"[ ] {INBOX_ICON} {text}"
     if due:
         try:
-            s += " _{//<" + dateutil.parser.parse(due, default=datetime.datetime(2020, 1, 1)).date().isoformat() \
-                 + "//}"
+            date = dateutil.parser.parse(due, default=datetime.datetime(2020, 1, 1)).date().isoformat()
+            start = f">{date} " if start_at_due and date > datetime.date.today().isoformat() else ""
+            s += f" _{{//{start}<{date}//}}"
         except (ValueError, OverflowError):
             s += f" (due: {due})"
     if note:
@@ -263,19 +274,42 @@ def html_to_text(s):
 
 def get_event_task(event):
     """ (text, due, note) of an event of the inbox calendar, as get_inbox_text takes them. The due date is
-        the day of the event, the time of a timed one follows the text; a repeated one is imported once. """
-    start = event.get("start") or {}
-    text = event.get("summary") or ""
+        the day of the event, the time of a timed one leads the text (Google Tasks keep no time), the end follows
+        it when on another day; the place and the video call link go to the note, as nothing else is kept
+        (the event gets deleted). An event with no summary takes its description as the text, a blank one
+        is not lost either. """
+    start, end = event.get("start") or {}, event.get("end") or {}
+    text = " ".join((event.get("summary") or "").split())
+    note = html_to_text(event.get("description") or "")
+    if not text:
+        text, note = " ".join(note.split()) or "(no title)", ""
     due = start.get("date") or ""
     if start.get("dateTime"):  # in the time zone of the calendar (UTC for the one the plugin created)
         local = dateutil.parser.isoparse(start["dateTime"]).astimezone()
         due = local.date().isoformat()
-        if text:
-            text += local.strftime(" %H:%M")
-    note = html_to_text(event.get("description") or "")
-    if event.get("recurrence"):
-        note = "\n".join(filter(None, (note, "repeats: " + "; ".join(event["recurrence"]))))
+        time_ = local.strftime("%H:%M")
+        if end.get("dateTime"):
+            local_end = dateutil.parser.isoparse(end["dateTime"]).astimezone()
+            if local_end.date() == local.date():
+                time_ += local_end.strftime("–%H:%M") if local_end > local else ""
+            else:
+                text += local_end.strftime(" (until %Y-%m-%d %H:%M)")
+        text = f"{time_} {text}"
+    elif due and end.get("date"):  # all-day, the end day is exclusive
+        last = datetime.date.fromisoformat(end["date"]) - datetime.timedelta(days=1)
+        if last.isoformat() > due:
+            text += f" (until {last.isoformat()})"
+    video = event.get("hangoutLink") or next(
+        (p.get("uri") for p in (event.get("conferenceData") or {}).get("entryPoints") or ()
+         if p.get("entryPointType") == "video"), None)
+    note = "\n".join(filter(None, (note, event.get("location"), video)))
     return text, due, note
+
+
+def is_repeated_event(event):
+    """ A series, or one occurrence of it. The inbox calendar leaves them be: deleting the event would delete
+        the whole series, a task cannot repeat, and every occurrence changed comes as another event. """
+    return bool(event.get("recurrence") or event.get("recurringEventId"))
 
 
 def parse_tasklists(pref):
@@ -344,7 +378,8 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
                                        '\nFilled in by Tools / Google Tasks / Create inbox calendar. Its events are'
                                        ' imported as tasks, then deleted from the calendar.'), ""),
         ('inbox_calendar_tasklist', 'string', _('Inbox calendar: make Google Tasks of its events in this list'
-                                                '\n(empty = plain Zim tasks 📥, "@default" = the default list)'), ""),
+                                                '\n(empty = plain Zim tasks 📥, "@default" = the default list).'
+                                                ' Future ones come into Zim when due.'), ""),
         ('tasklist', 'string', _('Task lists to import (empty = default)'
                                  '\nComma separated, optionally with an icon, ex: "My Tasks, Work=💼".'
                                  '\nThe first one is used for new tasks.'), ""),
@@ -1537,8 +1572,9 @@ class GoogletasksController:
         if include_due and task.get("due"):
             d = GoogletasksController.get_time(mode="date-only", from_string=task['due'])
             s += " _{//>" + d + "//}"
-        if task.get("notes", ""):  # insert other lines
-            s += "\n" + task['notes']
+        notes = inboxEventNoteRe.sub("", task.get("notes") or "")  # (only for the deduplication)
+        if notes:  # insert other lines
+            s += "\n" + notes
         return s
 
     @staticmethod
@@ -1595,11 +1631,17 @@ class GoogletasksController:
                     "status": "completed" if (match.group(1) or "").startswith("[*]") else "needsAction"
                     }
         else:
-            try:
-                task["title"] = lines[0].strip()
+            try:  # a plain Zim task, e.g. from the inbox
+                task["title"] = checkboxRe.sub("", lines[0].strip())
+                task["title"] = task["title"].removeprefix(INBOX_ICON).lstrip()
             except IndexError:
                 task["title"] = ""
-        if self.preferences["include_start_date"]:
+        dates = dateMarkupRe.search(task["title"])
+        if dates:  # the due date is preferred to the start date, Google Tasks have just one
+            dates_ = dict(re.findall(r'([<>]) ?(\d{4}-\d{2}-\d{2})', dates[1]))
+            task["due"] = dates_.get("<") or dates_[">"]
+            task["title"] = (task["title"][:dates.start()] + task["title"][dates.end():]).strip()
+        elif self.preferences["include_start_date"]:
             m = start_date_in_title.match(task["title"])
             if m:
                 # ex: 'test 13 _{//>2020-06-03//}' (start date in 'small' markup)
@@ -1633,8 +1675,11 @@ class GoogletasksController:
 
         # Set the date since that we fetch the tasks
         cache_exists = self.cache.exists()
-        if cache_exists:  # recently seen tasks since last import
+        if cache_exists:
             self.cache.load()
+            # the inbox calendar saves the cache before the very first import, which still takes today's tasks only
+            cache_exists = bool(self.cache.last_time())
+        if cache_exists:  # recently seen tasks since last import
             if not force:
                 max_hours = 3
                 now = time()
@@ -1834,8 +1879,8 @@ class GoogletasksController:
     def import_inbox_calendar(self):
         """ Import the events of the inbox calendar (the `inbox_calendar` preference) as tasks, all of them,
             the future ones too, and delete them from the calendar. As plain Zim tasks (see get_inbox_text),
-            or as Google Tasks of the list in `inbox_calendar_tasklist`. Does nothing if no calendar is set.
-            Returns the number of events imported (None on error). """
+            or as Google Tasks of the list in `inbox_calendar_tasklist`. Repeated events are left there.
+            Does nothing if no calendar is set. Returns the number of events imported (None on error). """
         calendar_id = (self.preferences["inbox_calendar"] or "").strip()
         if not calendar_id:
             return 0
@@ -1855,58 +1900,95 @@ class GoogletasksController:
         except (httplib2.ServerNotFoundError, OSError, Error) as e:
             self.error(INBOX_CALENDAR_MISSING, e)
             return None
+        repeated = [e.get("summary") or e["id"] for e in events if is_repeated_event(e)]
+        if repeated:
+            self.error(f"Repeated events are left in the inbox calendar, delete them there: {', '.join(repeated)}")
+            events = [e for e in events if not is_repeated_event(e)]
         if not events:
             return 0
         tasklist = (self.preferences["inbox_calendar_tasklist"] or "").strip()
         if tasklist:
-            texts, done, task_ids = self._inbox_events_to_tasks(events, tasklist)
+            texts, done, task_ids, passed = self._inbox_events_to_tasks(events, tasklist)
         else:
-            texts = [text for text in (get_inbox_text(*get_event_task(e)) for e in events) if text]
-            done, task_ids = events, []
+            texts = [text for text in (get_inbox_text(*get_event_task(e), start_at_due=True) for e in events) if text]
+            done, task_ids, passed = events, [], []
         if texts:
             wait_for_notebook(self.notebook)
             try:
                 on_main(self._insert_inbox, texts, "inbox calendar")
             except NotebookOperationOngoing as e:
-                if not task_ids:  # the events stay in the calendar, imported next time
-                    self.error("Notebook busy, the inbox calendar will be imported at the next sync", e)
-                    return None
-                # the Google Tasks exist already, the events go; the tasks come with the next import
-                self.error("Notebook busy, the tasks from the inbox calendar will come with the next import", e)
-                task_ids = []
+                # the events stay in the calendar, imported next time (their Google Tasks are not made twice,
+                # see _inbox_tasks_made); those whose tasks come with the import of the list go
+                self.error("Notebook busy, the inbox calendar will be imported at the next sync", e)
+                self._delete_inbox_events(calendar, calendar_id, passed)
+                return None
         if task_ids:  # imported, the import of the task list must not bring them again (see fetch)
             self.cache.load()
-            self.cache.undated_ids |= set(task_ids)
+            self.cache.items_ids |= set(task_ids)
             self.cache.save()
         self._delete_inbox_events(calendar, calendar_id, done)
         return len(done)
 
     def _inbox_events_to_tasks(self, events, tasklist):
         """ Make a Google Task of each event in the task list. Stops at the first failure, the events left
-            are imported next time. Returns (texts of the tasks for the page, events done, task IDs). """
-        texts, done, task_ids = [], [], []
+            are imported next time. A task due later than today is not put into the page if the list is imported:
+            the import brings it when due.
+            Returns (texts of the tasks for the page, events done, IDs of the tasks for the page,
+            events done whose tasks come with the import). """
+        texts, done, task_ids, passed = [], [], [], []
         try:
             list_id = self.list_id(tasklist)
             service = self.calendar_api.get_service(write_access=True, claim=False)
+            made = self._inbox_tasks_made(service, list_id)
+            imported = self._is_imported_list(list_id)
+            today = datetime.date.today().isoformat()
             for event in events:
-                text, due, note = get_event_task(event)
-                title, notes = " ".join(text.split()), note
-                if not title:
-                    title, notes = " ".join(note.split()), ""
-                if title:
-                    body = {"title": title, "notes": notes} if notes else {"title": title}
+                title, due, notes = get_event_task(event)
+                task = made.get(event["id"])
+                if not task:
+                    body = {"title": title, "notes": "\n".join(filter(None, (notes, INBOX_EVENT_NOTE + event["id"])))}
                     if due:
                         body["due"] = f"{due}T00:00:00.000Z"
                     task = service.tasks().insert(tasklist=list_id, body=body).execute()
-                    texts.append(self.get_task_text(task, self.preferences["include_start_date"], list_id,
-                                                    self.list_icon(list_id)))
+                if imported and due > today:
+                    passed.append(event)
+                else:  # with the date, even when the dates are not included, it may be a past one
+                    shown = {**task, "title": task["title"] + (f" _{{//<{due}//}}" if due else "")}
+                    texts.append(self.get_task_text(shown, False, list_id, self.list_icon(list_id)))
                     task_ids.append(task["id"])
-                done.append(event)  # (a blank one is just deleted)
+                done.append(event)
         except LookupError as e:
             self.error("Cannot make Google Tasks of the inbox calendar", e)
         except (httplib2.ServerNotFoundError, OSError, Error) as e:
             self.error("Error in communication while making Google Tasks of the inbox calendar", e)
-        return texts, done, task_ids
+        return texts, done, task_ids, passed
+
+    def _inbox_tasks_made(self, service, list_id):
+        """ {event ID: task} of the tasks of the list made of inbox calendar events lately (see INBOX_EVENT_NOTE),
+            so that an event not deleted after its task was made (a network failure, a busy notebook) does not
+            make another one. """
+        since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=INBOX_CALENDAR_MADE_DAYS)
+        made, token = {}, None
+        while True:
+            response = service.tasks().list(tasklist=list_id, updatedMin=since.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                                            showCompleted=True, showHidden=True, maxResults=100,
+                                            pageToken=token).execute()
+            for task in response.get("items", []):
+                match = inboxEventNoteRe.search(task.get("notes") or "")
+                if match:
+                    made[match[1]] = task
+            token = response.get("nextPageToken")
+            if not token:
+                return made
+
+    def _is_imported_list(self, list_id):
+        """ Whether the import of tasks reads the list, i.e. it is a chosen one ('@default' = the default list,
+            first in the cache, see refresh_task_lists). """
+        default = next(iter(self.cache.lists.values()), DEFAULT_LIST)
+
+        def real(id_):
+            return default if id_ == DEFAULT_LIST else id_
+        return any(real(self.cache.lists.get(title, title)) == real(list_id) for title, _icon in self.tasklists)
 
     def _delete_inbox_events(self, calendar, calendar_id, events):
         failed = []

@@ -181,6 +181,16 @@ def test_first_run_without_cache_file(gt, monkeypatch):
     assert cache.saved == 1
 
 
+def test_cache_saved_by_the_inbox_calendar_before_the_first_import_is_a_first_run(gt, monkeypatch):
+    """ Only today's tasks, not all since 1970 (the file exists, but no import has run yet). """
+    cache = FakeCache()
+    cache.last_fetched = 0
+    c = make_controller(gt, monkeypatch, [item("a", "Alpha")], cache)
+    c.fetch()  # not skipped as a recent fetch either
+    assert c.service.kwargs[0]["dueMin"] == c.get_time(mode="midnight")
+    assert "Alpha" in c.notebook.page.parsed
+
+
 def test_recent_fetch_is_skipped_unless_forced(gt, monkeypatch):
     cache = FakeCache(items_ids=())
     cache.last_fetched = datetime.datetime.now().timestamp()
