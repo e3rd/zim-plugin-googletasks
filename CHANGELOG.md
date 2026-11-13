@@ -1,4 +1,5 @@
 # Unreleased
+* fix: `Sync tasks status from server` unticked a task ticked while the sync was running (the server got the tick, the page did not); it also skipped indented tasks
 * new: tasks without a due date are imported (once, when they first appear) – `Import tasks without a due date` property, on by default
 * new: tasks assigned from Google Docs or Chat are imported – `Import tasks assigned to me from Google Docs or Chat` property, on by default
 * new: a link before the task title leads to where the task comes from: 📄↗ document, 💬↗ Chat space, 📧↗ e-mail, 📝↗ Keep note (the arrow makes room for the caret, so that Enter opens it)

@@ -133,6 +133,12 @@ def parse_task_href(href):
     return None
 
 
+def task_line(line):
+    """ (indent, match of taskAnchorTreeRe) of a page line, possibly indented; the match is None if not a task """
+    text = line.lstrip("\t")
+    return line[:len(line) - len(text)], taskAnchorTreeRe.match(text)
+
+
 def _api_task_id(web_id):
     return base64.urlsafe_b64encode(web_id.encode()).decode().rstrip("=")
 SOURCE_ICONS = {"DOCUMENT": "📄", "SPACE": "💬", "email": "📧", "keep_note": "📝"}
@@ -982,7 +988,9 @@ class GoogletasksWindow(MainWindowExtension):
 
     @action(_('_Sync tasks status from server'))  # T: menu item
     def sync_status(self):
-        self.controller.background(self.controller.sync_bullets_from_server, "sync")
+        # the checkboxes as they are now: a tick from now on goes to the server after the sync, which must not undo it
+        before = self.controller.page_tasks()
+        self.controller.background(lambda: self.controller.sync_bullets_from_server(before), "sync")
 
     @action(_('_Refresh task lists'))  # T: menu item
     def refresh_task_lists(self):
@@ -1264,12 +1272,10 @@ class GoogletasksController:
             page = self._get_page()
         lines = page.dump("wiki")
         for i, line in enumerate(lines):
-            text = line.lstrip("\t")
-            match = taskAnchorTreeRe.match(text)
+            indent, match = task_line(line)
             if match and parse_task_href(match[2])[1] == task_id:
                 box = BOX_MARKUP.get(bullet)
-                indent = line[:len(line) - len(text)]
-                lines[i] = indent + (box + " " if box else "") + text[len(match[1] or ""):]
+                lines[i] = indent + (box + " " if box else "") + line[len(indent) + len(match[1] or ""):]
                 message = f"Checkbox of task {task_id} reverted"
                 break
         else:
@@ -2053,8 +2059,19 @@ class GoogletasksController:
         return self.notebook.get_page(ZimPath(self.preferences["page"])) if self.preferences["page"] \
             else self.notebook.get_home_page()
 
-    def sync_bullets_from_server(self):
-        """ Loops tasks found on the page and un/check them according to the Google server task status."""
+    def page_tasks(self):
+        """ {task_id: (list_id, checkbox markup or None, task text)} of the tasks on the page (in the main thread) """
+        tasks = {}
+        for line in self._get_page().dump("wiki"):
+            _indent, match = task_line(line)
+            if match:
+                list_id, task_id = parse_task_href(match[2])
+                tasks[task_id] = (list_id, match[1], match[4])
+        return tasks
+
+    def sync_bullets_from_server(self, before):
+        """ Loops tasks found on the page and un/check them according to the Google server task status.
+            :param before: page_tasks() taken when the sync was queued; a checkbox changed since is left as is """
 
         service = self.calendar_api.get_service(info="Syncing tasks status")
 
@@ -2068,15 +2085,8 @@ class GoogletasksController:
             return False
         cache = {task["id"]: task["status"] == "completed" for task, _list_id, _icon in items}
 
-        # the page is read (and written) in the main thread, the server is asked here, in between
-        tasks = []
-        for line in on_main(lambda: self._get_page().dump("wiki")):
-            match = taskAnchorTreeRe.match(line)
-            if match:
-                tasks.append((*parse_task_href(match[2]), match[4]))
-
         unidentified_tasks = []
-        for list_id, task_id, task_text in tasks:
+        for task_id, (list_id, _checkbox, task_text) in before.items():
             if task_id in cache:
                 continue
             # perform single search, this task was not fetched within the cache
@@ -2091,25 +2101,27 @@ class GoogletasksController:
                 break
             else:
                 cache[task_id] = task["status"] == "completed"
-        on_main(self._set_bullets, cache)
+        on_main(self._set_bullets, cache, before)
         if unidentified_tasks:
             self.info(f"Cannot identify {len(unidentified_tasks)} tasks: " + ", ".join(unidentified_tasks))
 
-    def _set_bullets(self, statuses):
+    def _set_bullets(self, statuses, before):
         """ Un/check the tasks on the page by {task_id: completed} (None = unknown, left as is).
-            The page is read again, it may have changed while the server was asked. """
+            The page is read again, it may have changed while the server was asked. A checkbox that differs
+            from `before` (see page_tasks) has been un/ticked by the user meanwhile: the server status is older
+            and the tick is sent after the sync, so it is left as is. So is a task not on the page before. """
         page = self._get_page()
         contents = []
         for line in page.dump("wiki"):
-            match = taskAnchorTreeRe.match(line)
+            indent, match = task_line(line)
             if match:
                 _list_id, task_id = parse_task_href(match[2])
                 completed = statuses.get(task_id)
-                if completed is not None:  # we know the current status, replace the line
+                if completed is not None and task_id in before and before[task_id][1] == match[1]:
                     # strip "[.] " (a dot may be "*", "x", " ") from the beginning
                     task_s_without_bullet = match[0][(len(match[1]) if match[1] else 0):]
                     # put "[*]" or "[ ]" to the beginning
-                    line = "[{0}] {1}".format(("*" if completed else " "), task_s_without_bullet) + "\n"
+                    line = indent + "[{0}] {1}".format(("*" if completed else " "), task_s_without_bullet) + "\n"
             contents.append(line)
         self._store_to_page(contents, page)
 
