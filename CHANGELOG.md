@@ -1,4 +1,4 @@
-# Unreleased
+# 1.3 (2026-11-13)
 * fix: ticking a task on the very last line of a page (no newline after it) was not sent to the server
 * fix: the task dialog logged a false "Not yet implemented" error for every task with a date
 * fix: `Sync tasks status from server` unticked a task ticked while the sync was running (the server got the tick, the page did not); it also skipped indented tasks
