@@ -100,9 +100,7 @@ def test_get_time_modes_from_string(get_time_fn):
     assert get_time_fn(mode="date-only", **kw) == "2021-05-06"
     assert get_time_fn(mode="midnight", **kw) == "2021-05-06T00:00:00.000Z"
     assert get_time_fn(mode="morning", **kw) == "2021-05-06T08:00:00.000Z"
-    assert get_time_fn(mode="last-sec", **kw) == "2021-05-06T23:59:59.999Z"
     assert get_time_fn(mode="day", **kw) == "th"  # Thursday
-    assert get_time_fn(mode="object", **kw) == datetime.datetime(2021, 5, 6, 12, 34, 56)
     assert get_time_fn(**kw) == "2021-05-06T12:34:56"
 
 
@@ -139,8 +137,9 @@ def test_get_time_past_dates_false(get_time_fn):
     assert get_time_fn(mode="date-only", add_days=1, past_dates=False) == tomorrow
 
 
-def test_get_time_unknown_mode_falls_back_to_isoformat(get_time_fn):
-    assert get_time_fn(mode="bogus", from_string="2021-05-06T01:02:03") == "2021-05-06T01:02:03"
+def test_get_time_unknown_mode_raises(get_time_fn):
+    with pytest.raises(KeyError):
+        get_time_fn(mode="bogus", from_string="2021-05-06T01:02:03")
 
 
 @pytest.mark.parametrize("surface, icon", [("DOCUMENT", "📄"), ("SPACE", "💬"), ("OTHER", "🔗")])

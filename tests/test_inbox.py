@@ -51,7 +51,7 @@ def make_controller(gt, monkeypatch, values, inbox_sheet="https://docs.google.co
     controller.failed = False
     controller.notebook = FakeNotebook(FakePage(["Home\n", "\n", "existing\n"]))
     controller.sheets = FakeSheets(values, **sheets_kwargs)
-    controller.calendar_api = type("Api", (), {"get_inbox_services": lambda _self: controller.sheets})()
+    controller.api = type("Api", (), {"get_inbox_services": lambda _self: controller.sheets})()
     return controller
 
 
@@ -137,7 +137,7 @@ def test_not_granted_is_reported_without_oauth_flow(gt, monkeypatch):
     def not_granted(_self):
         raise LookupError(gt.INBOX_MISSING)
 
-    c.calendar_api = type("Api", (), {"get_inbox_services": not_granted})()
+    c.api = type("Api", (), {"get_inbox_services": not_granted})()
     assert c.import_inbox() is None
     assert c.failed
 

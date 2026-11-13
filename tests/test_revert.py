@@ -91,7 +91,7 @@ def checked(gt, error):
     def get_service(**_):
         raise error
 
-    c.calendar_api = types.SimpleNamespace(get_service=get_service)
+    c.api = types.SimpleNamespace(get_service=get_service)
     return c.task_checked("L1", "d2ViMQ", gt.CHECKED_BOX)
 
 

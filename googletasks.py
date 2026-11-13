@@ -1,7 +1,5 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-#
-from __future__ import annotations, print_function
+from __future__ import annotations
 
 import base64
 import binascii
@@ -39,15 +37,7 @@ try:
     from zim.gui.widgets import InputEntry
     from zim.gui.pageview import TextBuffer
     from zim.gui.mainwindow import MainWindow
-except RuntimeError:
-    """ When invoking the plugin from commandline, I was getting this on Ubuntu 17.10.
-    Defining blank Dialog class helps me to mitigate this strange issue.
-
-     File "/usr/lib/python2.7/dist-packages/zim/gui/clipboard.py", line 477, in __init__
-        self.clipboard = Gtk.Clipboard(selection=atom)
-     RuntimeError: could not create GtkClipboard object
-     """
-
+except RuntimeError:  # headless (command line): "could not create GtkClipboard object"
     class Dialog:
         pass
 
@@ -90,7 +80,7 @@ def find_client_secret_file():
 
 CLIENT_SECRET_FILE = find_client_secret_file()
 APPLICATION_NAME = 'googletasks2zim'
-TASK_ANCHOR_SYMBOL = u"\u270b"
+TASK_ANCHOR_SYMBOL = "✋"
 LIST_ICONS = (TASK_ANCHOR_SYMBOL, "💼", "🏠", "🛒", "📚", "⭐", "🔧", "🎯")
 "icons given in turn to the task lists that have no icon of their own in the preferences"
 DEFAULT_LIST = "@default"
@@ -157,6 +147,10 @@ checkboxRe = re.compile(r'^\[[ *x<>]\] ')
 INVALID_DAY = "N/A"
 HTTP_TIMEOUT = 30
 "seconds; without it, a dead network would keep a job (and the jobs queued after it) waiting forever"
+NETWORK_ERRORS = (httplib2.ServerNotFoundError, OSError, Error)
+"no network, a timeout (OSError), an error answer of Google"
+API_VERSIONS = {"tasks": "v1", "sheets": "v4", "calendar": "v3"}
+TASKS_MISSING = "Google Tasks access not granted yet – add a task from Zim once to grant it"
 BUSY_SUFFIX = " ⟳ Google Tasks"
 "appended to the window title while the jobs talking to Google run"
 INBOX_ICON = "📥"
@@ -354,7 +348,6 @@ You may create new task from inside Zim - just select some text, choose menu ite
  it should be restored in Zim from Google server.
 See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for actions
  and https://github.com/e3rd/zim-plugin-googletasks for more info.
-(V1.1)
 '''),
         'author': "Edvard Rejthar",
     }
@@ -399,11 +392,8 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
         # noinspection PyShadowingNames
         @monkeypatch_method(TextBuffer)
         def set_bullet(self, line, bullet, indent=None):
-            """ Overriding of pageview.py/TextBuffer/set_bullet """
-            # Note we cannot use any closure variable inherited from GoogletasksWindow here
-            # because when using multiple Zim windows,
-            # it would contains the first one always because TextBuffer.set_bullet exists only once.
-            # However we can use previously set self.notebook.self.plugin_googletasks
+            """ Overriding of pageview.py/TextBuffer/set_bullet. The class (and so this patch) is shared by all
+                windows, the controller is looked up by the notebook of the buffer, never taken from a closure. """
             if bullet in [CHECKED_BOX, UNCHECKED_BOX]:
                 controller: GoogletasksController = self.notebook.plugin_googletasks
                 list_id, task_id = controller.get_task_id(line, buffer=self)
@@ -424,30 +414,9 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
         # noinspection PyShadowingNames
         @monkeypatch_method(Page)
         def reload_textbuffer(self):
-            """ Overriding of notebook/page.py/Page/reload_textbuffer
-
-            The default implementation clears the textbuffer and re-inserts all
-            content at the cursor, which leaves the cursor (and thus the scrolled
-            view) at the very end of the page. That happens on every reload of a
-            currently displayed page - e.g. after an external process appends
-            text to the page file and asks the running Zim to pick it up (see
-            insert_note.py) - and jumps the view to the bottom of the page even
-            though nothing the user was looking at moved that far.
-
-            We restore the cursor to where it was before the reload, same
-            reasoning as the set_bullet patch above for finding the right
-            controller/window across multiple notebooks.
-
-            Note: unlike TextBuffer, a Page has no `.notebook` attribute of its
-            own - it's the bound TextBuffer (self._textbuffer) that carries
-            `.notebook` (see TextBuffer.__init__ in zim/gui/pageview), so we
-            look up the controller through that instead. This patch sits on the
-            shared Page class and therefore fires for *every* page reload in
-            every notebook, including notebooks this plugin never extended, so
-            each step of that lookup has to tolerate being absent - anything
-            missing simply means "no cursor to preserve", never an exception
-            that would abort the reload itself.
-            """
+            """ Overriding of notebook/page.py/Page/reload_textbuffer, which leaves the caret (and the view) at the
+                page end, e.g. after insert_note.py: the caret is put back. Fires for every page of every notebook,
+                so each step of the lookup (Page has no `.notebook`, its buffer has) may find nothing. """
             buffer = self._textbuffer
             notebook = getattr(buffer, "notebook", None) if buffer else None
             controller: GoogletasksController = getattr(notebook, "plugin_googletasks", None)
@@ -484,7 +453,8 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
             sys.exit(1)  # let cron/anacron notice
 
 
-class GoogleCalendarApi:
+class GoogleApi:
+    """ The Google services (Tasks, and the inbox Sheets and Calendar), each scope with its own credentials file """
     permission_write_file = os.path.join(WORKDIR, 'googletasks_oauth_write.json')
     permission_read_file = os.path.join(WORKDIR, 'googletasks_oauth.json')
     permission_inbox_file = os.path.join(WORKDIR, 'googletasks_oauth_inbox.json')
@@ -497,76 +467,54 @@ class GoogleCalendarApi:
         do not exist for it: reading, changing or deleting them (or their events) ends with 404. """
 
     def __init__(self, controller):
-        self.credential_path = None
-        self.scope = None
         self.controller: GoogletasksController = controller
 
     @staticmethod
     def service_obtainable(write_access=False):
-        if write_access:
-            return os.path.isfile(GoogleCalendarApi.permission_write_file)
-        else:
-            return os.path.isfile(GoogleCalendarApi.permission_read_file)
+        return os.path.isfile(GoogleApi.permission_write_file if write_access else GoogleApi.permission_read_file)
 
     def get_service(self, info=None, write_access=False, claim=True):
-        """ :param claim: Run the OAuth flow if not granted yet. Otherwise raise LookupError then. """
+        """ Tasks service. :param claim: see _service """
         if info:
-            self.controller.info(info)  # strangely, this info is not seen in the status bar
+            self.controller.info(info)
         if write_access:
-            self.credential_path = GoogleCalendarApi.permission_write_file
-            self.scope = 'https://www.googleapis.com/auth/tasks'
-        else:
-            self.credential_path = GoogleCalendarApi.permission_read_file
-            self.scope = 'https://www.googleapis.com/auth/tasks.readonly'
-        credentials = self.get_credentials(claim)
-        if not credentials:
-            raise LookupError("Google Tasks access not granted yet – add a task from Zim once to grant it")
-        http = credentials.authorize(httplib2.Http(timeout=HTTP_TIMEOUT))
-        return discovery.build('tasks', 'v1', http=http)
+            return self._service(GoogleApi.permission_write_file, 'https://www.googleapis.com/auth/tasks',
+                                 'tasks', TASKS_MISSING, claim)
+        return self._service(GoogleApi.permission_read_file, 'https://www.googleapis.com/auth/tasks.readonly',
+                             'tasks', TASKS_MISSING, claim)
 
     def get_inbox_services(self, claim=False):
-        """ Sheets service for the inbox sheet, with their own credentials (see inbox_scope).
-            :param claim: Run the OAuth flow if not granted yet. Otherwise raise LookupError then – the import
-                          (maybe headless, from cron) must not stop and wait for the browser. """
-        self.credential_path = GoogleCalendarApi.permission_inbox_file
-        self.scope = GoogleCalendarApi.inbox_scope
-        credentials = self.get_credentials(claim)
-        if not credentials:
-            raise LookupError(INBOX_MISSING)
-        http = credentials.authorize(httplib2.Http(timeout=HTTP_TIMEOUT))
-        return discovery.build('sheets', 'v4', http=http)
+        """ Sheets service for the inbox sheet, with their own credentials (see inbox_scope). """
+        return self._service(GoogleApi.permission_inbox_file, GoogleApi.inbox_scope, 'sheets', INBOX_MISSING, claim)
 
     def get_inbox_calendar_service(self, claim=False):
-        """ Calendar service for the inbox calendar, with its own credentials (see inbox_calendar_scope).
-            :param claim: see get_inbox_services """
-        self.credential_path = GoogleCalendarApi.permission_inbox_calendar_file
-        self.scope = GoogleCalendarApi.inbox_calendar_scope
-        credentials = self.get_credentials(claim)
+        """ Calendar service for the inbox calendar, with its own credentials (see inbox_calendar_scope). """
+        return self._service(GoogleApi.permission_inbox_calendar_file, GoogleApi.inbox_calendar_scope,
+                             'calendar', INBOX_CALENDAR_MISSING, claim)
+
+    def _service(self, credential_path, scope, api, missing, claim):
+        """ :param claim: Run the OAuth flow if not granted yet. Otherwise raise LookupError(missing) then – the import
+                          (maybe headless, from cron) must not stop and wait for the browser. """
+        credentials = self.get_credentials(credential_path, scope, claim)
         if not credentials:
-            raise LookupError(INBOX_CALENDAR_MISSING)
+            raise LookupError(missing)
         http = credentials.authorize(httplib2.Http(timeout=HTTP_TIMEOUT))
-        return discovery.build('calendar', 'v3', http=http)
+        return discovery.build(api, API_VERSIONS[api], http=http)
 
-    def get_credentials(self, claim=True):
-        """Gets valid user credentials from storage.
-
-        If nothing has been stored, or if the stored credentials are invalid,
-        the OAuth2 flow is completed to obtain the new credentials (if `claim`, else None is returned).
-
-        Returns:
-            Credentials, the obtained credential.
-        """
-        store = Storage(self.credential_path)
+    def get_credentials(self, credential_path, scope, claim=True):
+        """ Valid user credentials from storage. If there are none (or invalid), the OAuth2 flow obtains them
+            (if `claim`, else None is returned). """
+        store = Storage(credential_path)
         credentials = store.get()
         if not credentials or credentials.invalid:
             if not claim:
                 return None
-            flow = client.flow_from_clientsecrets(CLIENT_SECRET_FILE, self.scope)
-            flow.user_agent = APPLICATION_NAME  # Googletasks2zimPlugin.plugin_info["name"]
+            flow = client.flow_from_clientsecrets(CLIENT_SECRET_FILE, scope)
+            flow.user_agent = APPLICATION_NAME
             argv = sys.argv
             sys.argv = sys.argv[:1]  # tools.run_flow unfortunately parses arguments and would die from any zim args
             credentials = tools.run_flow(flow, store)
-            self.controller.info('Storing credentials to ' + self.credential_path)
+            self.controller.info('Storing credentials to ' + credential_path)
             sys.argv = argv
         return credentials
 
@@ -713,13 +661,18 @@ def ends_task(buffer, line):
             or bool(buffer.get_heading_text(buffer.get_iter_at_line(line))))
 
 
-def _line_text(buffer, line):
-    """ Plain text of a single line of a Gtk.TextBuffer, without the trailing newline. """
+def line_bounds(buffer, line):
+    """ (start, end) iters of a line of a Gtk.TextBuffer, without the trailing newline. """
     start = buffer.get_iter_at_line(line)
     end = start.copy()
     if not end.ends_line():
         end.forward_to_line_end()
-    return buffer.get_text(start, end, True)
+    return start, end
+
+
+def _line_text(buffer, line):
+    """ Plain text of a single line of a Gtk.TextBuffer, without the trailing newline. """
+    return buffer.get_text(*line_bounds(buffer, line), True)
 
 
 def get_cursor_anchor(pageview):
@@ -731,15 +684,8 @@ def get_cursor_anchor(pageview):
 
 
 def restore_cursor_anchor(pageview, anchor):
-    """ Put the caret back onto the line it was on, located by that line's text.
-
-    Restoring a plain character (or even line) offset breaks as soon as something was inserted
-    *above* the caret - which is exactly what this plugin and insert_note.py do, they insert
-    after the first blank line near the top of the page - so the caret would land somewhere in
-    or below the freshly inserted block instead of where the user was reading. Therefore we look
-    the line up by its content and, if it occurs several times, take the occurrence closest to
-    the original line number. Blank/vanished lines fall back to the plain line number.
-    """
+    """ Put the caret back onto the line it was on, located by that line's text (lines are inserted above it),
+        the occurrence closest to the original line number; a blank or vanished line falls back to that number. """
     line, text, column = anchor
     buffer = pageview.textview.get_buffer()
     last_line = buffer.get_line_count() - 1
@@ -782,9 +728,9 @@ class GoogletasksWindow(MainWindowExtension):
 
             # Set up menu items. Here we change parent function behaviour.
             permissions = []
-            if GoogleCalendarApi.service_obtainable():
+            if GoogleApi.service_obtainable():
                 permissions.append("<menuitem action='permission_readonly'/>")
-            if GoogleCalendarApi.service_obtainable(write_access=True):
+            if GoogleApi.service_obtainable(write_access=True):
                 permissions.append("<menuitem action='permission_write'/>")
             if permissions:
                 permissions = ["<separator/>"] + permissions
@@ -906,23 +852,24 @@ class GoogletasksWindow(MainWindowExtension):
 
     @action(_('_Claim read only access'))  # T: menu item
     def permission_readonly(self):
-        self.controller.background(self.controller.calendar_api.get_service, "claim")
+        self.controller.background(self.controller.api.get_service, "claim")
 
     @action(_('_Claim write access'))  # T: menu item
     def permission_write(self):
-        self.controller.background(lambda: self.controller.calendar_api.get_service(write_access=True), "claim")
+        self.controller.background(lambda: self.controller.api.get_service(write_access=True), "claim")
 
     @action(_('_Import new tasks'), accelerator='<ctrl><alt>g')  # T: menu item
     def import_tasks(self):
-        if self.controller.preferences["auto_sync"]:
-            self.sync_status()
-        self.controller.background(lambda: self.controller.fetch(force=True), "import")
+        self._import()
 
     @action(_('_Import all non-completed even already imported tasks from the past'))  # T: menu item
     def import_history(self):
+        self._import(all_history=True)
+
+    def _import(self, all_history=False):
         if self.controller.preferences["auto_sync"]:
             self.sync_status()
-        self.controller.background(lambda: self.controller.fetch(all_history=True), "import")
+        self.controller.background(lambda: self.controller.fetch(force=True, all_history=all_history), "import")
 
     @action(_('Create _inbox sheet...'))  # T: menu item
     def create_inbox(self):
@@ -1103,8 +1050,6 @@ class GoogletasksNewTaskDialog(Dialog):
             self.input_title.set_text(self.task["title"])
         if "notes" in self.task:
             self.input_notes.get_buffer().set_text(self.task["notes"])
-        if "due" in self.task:
-            logger.error("Not yet implemented")  # XX
 
         # display window
         self.show_all()
@@ -1147,13 +1092,13 @@ class GoogletasksNewTaskDialog(Dialog):
                 days_ahead += 7
             return d + datetime.timedelta(days_ahead)
 
-        d = self.controller.get_time(add_days=add_days, mode="object")
+        d = datetime.date.today() + datetime.timedelta(add_days)
 
         if next_monday:
             d = next_weekday(d, 0)  # 0 = Monday, 1=Tuesday, 2=Wednesday...
         if relative_delta:
             d += relativedelta(**relative_delta)
-        return self.controller.get_time(use_date=d, mode="date-only")
+        return d.isoformat()
 
     def update_date(self, _):
         try:
@@ -1201,9 +1146,6 @@ class GoogletasksNewTaskDialog(Dialog):
             buffer.insert_parsetree_at_cursor(Parser().parse(text))
         self.destroy()
 
-    # def postpone(self, _, number):
-    #     self.input_due.set_text(self.controller.get_time(add_days=number, mode="date-only"))
-    #     self.do_response_ok()
     def postpone(self, date):
 
         def _(_):
@@ -1225,7 +1167,7 @@ class GoogletasksController:
         self.notebook.plugin_googletasks = self
 
         self.cache = Cache(Path(str(self.notebook.cache_dir), CACHE_FILE)).load()
-        self.calendar_api = GoogleCalendarApi(self)
+        self.api = GoogleApi(self)
         self.failed = False
         "True once error() was called; the headless command turns it into a non-zero exit code"
         self.ticks = {}
@@ -1249,11 +1191,7 @@ class GoogletasksController:
     @staticmethod
     def line_markup(buffer, line):
         """ Wiki markup of the line in the buffer, without the newline. """
-        start = buffer.get_iter_at_line(line)
-        end = start.copy()
-        if not end.ends_line():
-            end.forward_to_line_end()
-        return "".join(get_dumper("wiki").dump(buffer.get_parsetree((start, end)))).rstrip("\n")
+        return "".join(get_dumper("wiki").dump(buffer.get_parsetree(line_bounds(buffer, line)))).rstrip("\n")
 
     def revert_bullet(self, page_name, task_id, bullet, markup, tick):
         """ The server refused the un/tick of the task: put its checkbox back to `bullet`.
@@ -1358,7 +1296,7 @@ class GoogletasksController:
         """
         task = {"status": "completed" if bullet is CHECKED_BOX else "needsAction"}
         try:
-            service = self.calendar_api.get_service(write_access=True,
+            service = self.api.get_service(write_access=True,
                                                     info=f"Marking task ID {task_id} as {task['status']}")
             list_id = list_id or self.primary_list_id
             if bullet is CHECKED_BOX:  # small patch will be sufficient
@@ -1368,17 +1306,11 @@ class GoogletasksController:
                 task.pop("completed", None)
                 task["status"] = "needsAction"
                 service.tasks().update(tasklist=list_id, task=task_id, body=task).execute()
-        except HttpError as e:
-            if e.resp.status in (404, 410):  # deleted on the server, nothing to revert to
+        except Exception as e:  # LookupError: unknown list
+            if isinstance(e, HttpError) and e.resp.status in (404, 410):  # deleted on the server, nothing to revert to
                 self.error(f"Task {task_id} is not on the server any more", e)
                 return None
-            self.error("Error in communication while un/checking", e)
-            return False
-        except LookupError as e:
             self.error("Cannot un/check the task", e)
-            return False
-        except Exception as e:
-            self.error("Error in communication while un/checking", e)
             return False
         self.info(f'Marked as {task["status"]}')
         return True
@@ -1395,7 +1327,7 @@ class GoogletasksController:
             task["due"] = self.get_time(add_days=1, mode="morning")
         body = {k: v for k, v in task.items() if not k.startswith("_")}
 
-        service = self.calendar_api.get_service(write_access=True, info=f"Submitting task {task.get('title')}")
+        service = self.api.get_service(write_access=True, info=f"Submitting task {task.get('title')}")
 
         # noinspection PyBroadException
         try:
@@ -1419,42 +1351,22 @@ class GoogletasksController:
 
     @staticmethod
     def get_time(add_days=0, mode=None, from_string=None, use_date=None, past_dates=True):
-        """ Time formatting function
-         mode =  object | date-only | morning | midnight | last-sec | day
-
-         We preferably use `use_date` object, else we parses from `from_string`. If `from_string` has missing info,
-         it is taken from the default 2020-01-01, so ex: '2021-05' will be converted to '2021-05-01'
+        """ `use_date`, else parsed `from_string` (missing parts from 2020-01-01: '2021-05' → '2021-05-01'),
+            else now; plus `add_days`. Raises ValueError if it is in the past and not `past_dates`.
+            :param mode: date-only | midnight | morning | day (two letters of the weekday); None = ISO format
         """
-        dt_now = use_date if use_date else \
-            dateutil.parser.parse(from_string, default=datetime.datetime(2020, 1, 1)) if from_string else \
-            datetime.datetime.now()
-        if add_days:
-            dt_now += datetime.timedelta(add_days, 0)
-        if not past_dates and dt_now.isoformat()[:10] < datetime.datetime.now().isoformat()[:10]:
-            # why isoformat? something with tzinfo
+        d = use_date or (dateutil.parser.parse(from_string, default=datetime.datetime(2020, 1, 1)) if from_string
+                         else datetime.datetime.now())
+        d += datetime.timedelta(add_days)
+        date = d.isoformat()[:10]
+        if not past_dates and date < datetime.date.today().isoformat():
             raise ValueError
-        if mode:
-            try:
-                return {
-                    "object": lambda: dt_now,
-                    "date-only": lambda: dt_now.isoformat()[:10],
-                    "midnight": lambda: dt_now.isoformat()[:11] + "00:00:00.000Z",
-                    "morning": lambda: dt_now.isoformat()[:11] + "08:00:00.000Z",
-                    "last-sec": lambda: dt_now.isoformat()[:11] + "23:59:59.999Z",
-                    "day": lambda: dt_now.strftime("%A").lower()[:2]
-                }[mode]()
-            except KeyError:
-                logger.error("Wrong time mode {}!".format(mode))
-        return dt_now.isoformat()
+        return {None: d.isoformat(), "date-only": date, "midnight": date + "T00:00:00.000Z",
+                "morning": date + "T08:00:00.000Z", "day": d.strftime("%A").lower()[:2]}[mode]
 
     def info(self, text):
-        """ Echo to the console and status bar. """
-        text = "[Googletasks] " + str(text)
-        logger.info(text)
-        # As of Zim 0.74 (3.12.2020), the status bar has been removed with no substitute,
-        # we do not output the text now.
-        # if self.window:
-        #     self.window.statusbar.push(0, text)
+        """ Log the text (Zim 0.74+ has no status bar to show it in). """
+        logger.info("[Googletasks] " + str(text))
 
     def error(self, msg, exc=None, fatal=False):
         """ Report a problem so that somebody notices it (unlike a bare `logger.error`).
@@ -1482,7 +1394,7 @@ class GoogletasksController:
     def _read_service(self, info):
         """ Service for reading. In case of an error, informs user and raises LookupError. """
         try:
-            return self.calendar_api.get_service(info=info)
+            return self.api.get_service(info=info)
         except Exception as e:  # OAuth flow, missing/invalid client secret, network...
             self.error("Cannot connect to Google Tasks", e, fatal=True)
             raise LookupError from e
@@ -1512,7 +1424,7 @@ class GoogletasksController:
                 page_token = results.get('nextPageToken')
                 if not page_token:
                     return [item for item in items if not item.get("due")] if undated else items
-        except (httplib2.ServerNotFoundError, OSError, Error) as e:
+        except NETWORK_ERRORS as e:
             self.error("Cannot read the task list", e)
             raise LookupError from e
 
@@ -1589,23 +1501,12 @@ class GoogletasksController:
         return links
 
     @classmethod
-    def readline(cls, line_i, buffer):
-        """ this crazy construct just reads a line at position in a page """
-        text_iter = buffer.get_iter_at_line(line_i)
-        start = buffer.get_iter_at_offset(text_iter.get_offset())
-        if text_iter.forward_to_line_end():
-            end = buffer.get_iter_at_offset(text_iter.get_offset())
-        else:
-            end = start
-        return buffer.get_slice(start, end, include_hidden_chars=True)
-
-    @classmethod
     def get_task_id(cls, line_i, buffer):
         """ (list_id, task_id) of the task anchor on the line, (None, None) if there is none.
             list_id is None for the links written before multiple lists were supported. """
-        start = buffer.get_iter_at_line(line_i)
+        start, end = line_bounds(buffer, line_i)
         # the icon is only the link label (and differs per list), the link itself is what we look for
-        for offset in range(start.get_offset(), start.get_offset() + len(cls.readline(line_i, buffer))):
+        for offset in range(start.get_offset(), end.get_offset()):
             # noinspection PyBroadException
             try:
                 href = (buffer.get_link_data(buffer.get_iter_at_offset(offset)) or {}).get("href") or ""
@@ -1659,13 +1560,6 @@ class GoogletasksController:
         """ Get the new tasks and insert them into page
         :type force: Cancels the action if False and cache file have been accessed recently.
         :type all_history: If True, imports all non-completed tasks. `force` is implied
-                Note: When importing `all_history`, I have spotted a task that should appear at 7 December 2020
-                 (as confirmed at the Google Calendar web page), however this is what we got from the server:
-                 {'updated': '2019-07-25T10:11:12.000Z', 'status': 'needsAction', 'due': '2017-12-22T00:00:00.000Z'}
-                 I have to admit that this task has been postponed few times.
-                 But we cannot rely on fetching past-tasks only feature, its December date is seen nowhere.
-
-        XX Add plugin option "import even completed tasks" ?
         """
         if all_history:
             force = True
@@ -1712,17 +1606,12 @@ class GoogletasksController:
         items_ids = set()
         undated_ids = set()
         for item, list_id, icon in items:
-            # We remember the task ID, not the etag. The etag is a version fingerprint that changes
-            # whenever *anything* about the task changes - title, due date, even its position in the
-            # list - so an already imported task that got touched on the server looked brand new and
-            # was imported a second time. (`or item["etag"]` only keeps caches written by older
-            # versions of the plugin working; it may be dropped in some future release.)
+            # the task ID, not the etag, which changes with anything (even the position in the list);
+            # `or item["etag"]` keeps the caches of older versions working
             already_imported = item["id"] in self.cache.items_ids or item["etag"] in self.cache.items_ids \
                 or item["id"] in self.cache.undated_ids
-            # Remember *every* task the server returned, not just those due today or later. `due_min`
-            # above reaches back to the midnight of the previous import, so past-due tasks are handed
-            # to us again on the next run - forgetting them here is what re-imported yesterday's
-            # tasks today. The set stays bounded anyway: it is rebuilt from one response each time.
+            # every task returned, also the past-due ones: the next import (due_min = the midnight of this one)
+            # gets them again; the set stays bounded, it is rebuilt from one response each time
             (items_ids if item.get("due") else undated_ids).add(item["id"])
             if already_imported:
                 logger.debug('Text already imported {}.'.format(item.get("title")))
@@ -1746,25 +1635,36 @@ class GoogletasksController:
         self.cache.undated_ids = undated_ids | (self.cache.undated_ids - items_ids)
         self.cache.items_ids = items_ids
         save = self.cache.touch_save if complete else self.cache.save
+        # if busy, the cache is not saved, the tasks are imported next time
+        self._when_free("tasks", self._insert_tasks, texts, icons, save if texts or cache_exists else None)
+
+    def _when_free(self, what, fn, *args):
+        """ Call `fn(*args)` in the main thread once Zim's notebook operation (if any) is over. If the notebook
+            stays busy, reports that `what` will be imported at the next sync and returns False. """
         wait_for_notebook(self.notebook)
         try:
-            on_main(self._insert_tasks, texts, icons, save if texts or cache_exists else None)
-        except NotebookOperationOngoing as e:  # the cache is not saved, the tasks are imported next time
-            self.error("Notebook busy, tasks will be imported at the next sync", e)
+            on_main(fn, *args)
+        except NotebookOperationOngoing as e:
+            self.error(f"Notebook busy, {what} will be imported at the next sync", e)
+            return False
+        return True
+
+    def _insert_lines(self, texts):
+        """ Insert the lines after the first blank line of the page. Returns the page. """
+        page = self._get_page()
+        if texts:
+            self._store_to_page(insert_after_first_blank_line(page.dump("wiki"), "\n".join(texts) + "\n"), page)
+        return page
 
     def _insert_tasks(self, texts, icons, save):
         """ Insert the imported tasks into the page (in the main thread, see on_main), then call `save`
             (the cache, which must not remember them as imported before they are on the page). """
-        page = self._get_page()
+        page = self._insert_lines(texts)
         per_list = ", ".join(f"{icon} {icons.count(icon)}" for icon in dict.fromkeys(icons))
         self.info(f"New tasks: {len(texts)}{f' ({per_list})' if len(self.tasklists) > 1 and texts else ''},"
                   f" page: {page.get_title()}")
-        if texts:
-            self._store_to_page(insert_after_first_blank_line(page.dump("wiki"), "\n".join(texts) + "\n"), page)
         if save:
             save()
-        # with open(CACHE_FILE, "wb") as f:
-        #     pickle.dump(self.item_ids, f)
 
     def _inbox_sheet(self, sheets, sheet_id):
         """ (title, numeric sheetId) of the first sheet of the inbox spreadsheet """
@@ -1779,14 +1679,14 @@ class GoogletasksController:
         if not sheet_id:
             return 0
         try:
-            sheets = self.calendar_api.get_inbox_services()
+            sheets = self.api.get_inbox_services()
             title, grid_id = self._inbox_sheet(sheets, sheet_id)
             values = sheets.spreadsheets().values().get(
                 spreadsheetId=sheet_id, range="'{}'!A:Z".format(title.replace("'", "''"))).execute().get("values", [])
         except LookupError as e:
             self.error(str(e))
             return None
-        except (httplib2.ServerNotFoundError, OSError, Error, KeyError, IndexError) as e:
+        except (*NETWORK_ERRORS, KeyError, IndexError) as e:
             self.error(INBOX_MISSING, e)
             return None
         try:
@@ -1797,34 +1697,28 @@ class GoogletasksController:
         if not rows:
             return 0
         texts = [text for text in (get_inbox_text(*row[1:]) for row in rows) if text]
-        if texts:
-            wait_for_notebook(self.notebook)
-            try:
-                on_main(self._insert_inbox, texts)
-            except NotebookOperationOngoing as e:  # the rows stay in the sheet, imported next time
-                self.error("Notebook busy, the inbox sheet will be imported at the next sync", e)
-                return None
+        if texts and not self._when_free("the inbox sheet", self._insert_inbox, texts):  # the rows stay there
+            return None
         # bottom up, so that the indexes of the rows still to delete do not move; rows added meanwhile go below
         requests = [{"deleteDimension": {"range": {"sheetId": grid_id, "dimension": "ROWS",
                                                    "startIndex": index, "endIndex": index + 1}}}
                     for index, *_row in sorted(rows, reverse=True)]
         try:
             sheets.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
-        except (httplib2.ServerNotFoundError, OSError, Error) as e:
+        except NETWORK_ERRORS as e:
             self.error("Tasks imported from the inbox sheet, but not deleted from it – delete them by hand,"
                        " else they are imported again", e, fatal=True)
         return len(texts)
 
     def _insert_inbox(self, texts, source="inbox sheet"):
-        page = self._get_page()
-        self._store_to_page(insert_after_first_blank_line(page.dump("wiki"), "\n".join(texts) + "\n"), page)
+        page = self._insert_lines(texts)
         self.info(f"New tasks from the {source}: {len(texts)}, page: {page.get_title()}")
 
     def create_inbox(self):
         """ Create the inbox sheet and set it in the preferences. If one is set and accessible already,
             just return it. Returns its URL, None on error. """
         try:
-            sheets = self.calendar_api.get_inbox_services(claim=True)
+            sheets = self.api.get_inbox_services(claim=True)
         except Exception as e:  # OAuth flow, missing/invalid client secret, network...
             self.error("Cannot connect to Google Sheets", e, fatal=True)
             return None
@@ -1833,7 +1727,7 @@ class GoogletasksController:
             try:
                 self._inbox_sheet(sheets, sheet_id)
                 return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-            except (httplib2.ServerNotFoundError, OSError, Error, KeyError, IndexError) as e:
+            except (*NETWORK_ERRORS, KeyError, IndexError) as e:
                 self.info(f"The inbox sheet set is not accessible, creating a new one: {e}")
 
         def cells(texts, bold, background):
@@ -1861,7 +1755,7 @@ class GoogletasksController:
                     "range": {"sheetId": grid_id, "startRowIndex": 0, "endRowIndex": INBOX_HEADER_ROWS},
                     "description": "Managed by the Google Tasks plugin for Zim", "warningOnly": True}}},
             ]}).execute()
-        except (httplib2.ServerNotFoundError, OSError, Error, KeyError, IndexError) as e:
+        except (*NETWORK_ERRORS, KeyError, IndexError) as e:
             self.error("Cannot create the inbox sheet", e, fatal=True)
             return None
         on_main(self._set_preference, "inbox_sheet", spreadsheet["spreadsheetUrl"])
@@ -1885,7 +1779,7 @@ class GoogletasksController:
         if not calendar_id:
             return 0
         try:
-            calendar = self.calendar_api.get_inbox_calendar_service()
+            calendar = self.api.get_inbox_calendar_service()
             events, token = [], None
             while True:
                 response = calendar.events().list(calendarId=calendar_id, pageToken=token,
@@ -1897,7 +1791,7 @@ class GoogletasksController:
         except LookupError as e:
             self.error(str(e))
             return None
-        except (httplib2.ServerNotFoundError, OSError, Error) as e:
+        except NETWORK_ERRORS as e:
             self.error(INBOX_CALENDAR_MISSING, e)
             return None
         repeated = [e.get("summary") or e["id"] for e in events if is_repeated_event(e)]
@@ -1912,16 +1806,11 @@ class GoogletasksController:
         else:
             texts = [text for text in (get_inbox_text(*get_event_task(e), start_at_due=True) for e in events) if text]
             done, task_ids, passed = events, [], []
-        if texts:
-            wait_for_notebook(self.notebook)
-            try:
-                on_main(self._insert_inbox, texts, "inbox calendar")
-            except NotebookOperationOngoing as e:
-                # the events stay in the calendar, imported next time (their Google Tasks are not made twice,
-                # see Cache.inbox_tasks); those whose tasks come with the import of the list go
-                self.error("Notebook busy, the inbox calendar will be imported at the next sync", e)
-                self._delete_inbox_events(calendar, calendar_id, passed)
-                return None
+        if texts and not self._when_free("the inbox calendar", self._insert_inbox, texts, "inbox calendar"):
+            # the events stay in the calendar, imported next time (their Google Tasks are not made twice,
+            # see Cache.inbox_tasks); those whose tasks come with the import of the list go
+            self._delete_inbox_events(calendar, calendar_id, passed)
+            return None
         if task_ids:  # imported, the import of the task list must not bring them again (see fetch)
             self.cache.load()
             self.cache.items_ids |= set(task_ids)
@@ -1944,7 +1833,7 @@ class GoogletasksController:
         made = self.cache.inbox_tasks = {k: v for k, v in self.cache.inbox_tasks.items() if k in ids}
         try:
             list_id = self.list_id(tasklist)
-            service = self.calendar_api.get_service(write_access=True, claim=False)
+            service = self.api.get_service(write_access=True, claim=False)
             imported = self._is_imported_list(list_id)
             today = datetime.date.today().isoformat()
             for event in events:
@@ -1964,7 +1853,7 @@ class GoogletasksController:
                 done.append(event)
         except LookupError as e:
             self.error("Cannot make Google Tasks of the inbox calendar", e)
-        except (httplib2.ServerNotFoundError, OSError, Error) as e:
+        except NETWORK_ERRORS as e:
             self.error("Error in communication while making Google Tasks of the inbox calendar", e)
         self.cache.save()
         return texts, done, task_ids, passed
@@ -1994,7 +1883,7 @@ class GoogletasksController:
                     batch.add(calendar.events().delete(calendarId=calendar_id, eventId=event["id"]),
                               request_id=event["id"])
                 batch.execute()
-        except (httplib2.ServerNotFoundError, OSError, Error) as e:
+        except NETWORK_ERRORS as e:
             failed.append(e)
         self.cache.load()
         if self.cache.inbox_tasks.keys() & set(gone):
@@ -2009,7 +1898,7 @@ class GoogletasksController:
         """ Create the inbox calendar and set it in the preferences. If one is set and accessible already,
             just return it. Returns its ID, None on error. """
         try:
-            calendar = self.calendar_api.get_inbox_calendar_service(claim=True)
+            calendar = self.api.get_inbox_calendar_service(claim=True)
         except Exception as e:  # OAuth flow, missing/invalid client secret, network...
             self.error("Cannot connect to Google Calendar", e, fatal=True)
             return None
@@ -2018,12 +1907,12 @@ class GoogletasksController:
             try:
                 calendar.calendars().get(calendarId=calendar_id).execute()
                 return calendar_id
-            except (httplib2.ServerNotFoundError, OSError, Error) as e:
+            except NETWORK_ERRORS as e:
                 self.info(f"The inbox calendar set is not accessible, creating a new one: {e}")
         try:
             calendar_id = calendar.calendars().insert(body={"summary": INBOX_CALENDAR_TITLE,
                                                             "description": INBOX_CALENDAR_DESCRIPTION}).execute()["id"]
-        except (httplib2.ServerNotFoundError, OSError, Error, KeyError) as e:
+        except (*NETWORK_ERRORS, KeyError) as e:
             self.error("Cannot create the inbox calendar", e, fatal=True)
             return None
         on_main(self._set_preference, "inbox_calendar", calendar_id)
@@ -2033,16 +1922,8 @@ class GoogletasksController:
     # --- (end of inbox calendar) ---
 
     def _store_to_page(self, contents, page):
-        """
-
-        :param contents: [] lines of the page
-        :param page: ZimPage
-
-        page.parse() refills the whole textbuffer, leaving the caret at the end of the page. If the page
-        is the one being displayed, we put the caret back onto its line (see restore_cursor_anchor).
-        (The names used to be compared by `is`, which is False for two equal strings that are
-        not the same object, so the caret was never restored and jumped to the end.)
-        """
+        """ Store the lines into the page. page.parse() leaves the caret at the page end: on the page being
+            displayed it is put back onto its line (see restore_cursor_anchor). """
         operation = ongoing_operation(self.notebook)
         if operation:  # store_page() would be refused after the page had been changed already – and autosaved later
             raise NotebookOperationOngoing(operation.message)
@@ -2073,11 +1954,9 @@ class GoogletasksController:
         """ Loops tasks found on the page and un/check them according to the Google server task status.
             :param before: page_tasks() taken when the sync was queued; a checkbox changed since is left as is """
 
-        service = self.calendar_api.get_service(info="Syncing tasks status")
+        service = self.api.get_service(info="Syncing tasks status")
 
         # build status cache from last 14 days so that we have to fetch one by one as little tasks as possible
-        # XX maybe we may check the number of tasks to be fetched one-by-one after that and if it is still big,
-        # perform more batch operation like this if there is a performance issue
         try:
             items, _complete = self._read_chosen_lists(self.get_time(add_days=-14, mode="midnight"),
                                                        show_completed=True, service=service)
@@ -2127,11 +2006,11 @@ class GoogletasksController:
 
     def refresh_task_lists(self):
         self.cache.load()
-        service = self.calendar_api.get_service(info="Refreshing task lists")
+        service = self.api.get_service(info="Refreshing task lists")
         try:
             results = service.tasklists().list().execute()
             default_id = service.tasklists().get(tasklist=DEFAULT_LIST).execute()["id"]
-        except (httplib2.ServerNotFoundError, OSError, Error) as e:
+        except NETWORK_ERRORS as e:
             self.error("Cannot refresh task lists", e)
             return False
         items = results.get('items', [])
@@ -2171,18 +2050,9 @@ class Cache:
         "get initial datetime"
 
     def load(self):
-        """ (Re)read the cache file whenever it changed on disk since we last looked.
-
-        We are not the only writer. The Zim GUI keeps a single Cache object alive for the whole
-        life of the window, while `zim --plugin googletasks` (anacron, see README) imports from a
-        separate process with a Cache of its own. Reading the file only once meant the running Zim
-        never learned about the nightly import: the next manual "Import new tasks" still worked
-        from the task IDs it had seen at startup, imported the very same tasks a second time and
-        then overwrote the cron's cache file with its own outdated copy.
-
-        Loading is tolerant: a file in the old jsonpickle format is migrated (and re-saved in the
-        current format), an unknown or corrupt file yields an empty cache.
-        """
+        """ (Re)read the cache file whenever it changed on disk since we last looked: the headless command
+            (cron) writes it from another process. An old jsonpickle file is migrated, a corrupt one yields
+            an empty cache. """
         if self.exists() and os.path.getmtime(self._path) != self._mtime:
             mtime = os.path.getmtime(self._path)
             try:
@@ -2205,10 +2075,8 @@ class Cache:
         Current format: {"version": 1, "items_ids": [...], "undated_ids": [...], "lists": {...}, "icons": {...},
          "inbox_tasks": {...}, "last_fetched": float}. (`undated_ids`, `icons` and `inbox_tasks` were added later,
          a file without them is fine.)
-        Old format (no "version") was written by jsonpickle: plain JSON as well, only the set of IDs
-        is wrapped as {"py/set": [...]}, and the timestamp may be called `date_at` in even older files.
-        We read it as plain JSON so that already imported tasks are not imported again and
-        jsonpickle is not needed.
+        Old format (no "version") was written by jsonpickle: the set of IDs is wrapped as {"py/set": [...]},
+        the timestamp may be called `date_at`.
         """
         raw = json.loads(text)
         if not isinstance(raw, dict):

@@ -97,7 +97,7 @@ def make_controller(gt, pages, tasklist="", calendar_id=CAL, **calendar_kwargs):
     c.notebook = FakeNotebook(FakePage(["Home\n", "\n", "existing\n"]))
     c.calendar = FakeCalendar(pages, **calendar_kwargs)
     c.tasks_service = FakeTasks()
-    c.calendar_api = types.SimpleNamespace(get_inbox_calendar_service=lambda claim=False: c.calendar,
+    c.api = types.SimpleNamespace(get_inbox_calendar_service=lambda claim=False: c.calendar,
                                            get_service=lambda **_: c.tasks_service)
     return c
 
@@ -275,7 +275,7 @@ def test_not_granted_is_reported_without_oauth_flow(gt):
         assert not claim
         raise LookupError(gt.INBOX_CALENDAR_MISSING)
 
-    c.calendar_api.get_inbox_calendar_service = not_granted
+    c.api.get_inbox_calendar_service = not_granted
     assert c.import_inbox_calendar() is None
     assert c.failed
 

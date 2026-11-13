@@ -1,4 +1,6 @@
 # Unreleased
+* fix: ticking a task on the very last line of a page (no newline after it) was not sent to the server
+* fix: the task dialog logged a false "Not yet implemented" error for every task with a date
 * fix: `Sync tasks status from server` unticked a task ticked while the sync was running (the server got the tick, the page did not); it also skipped indented tasks
 * new: tasks without a due date are imported (once, when they first appear) – `Import tasks without a due date` property, on by default
 * new: tasks assigned from Google Docs or Chat are imported – `Import tasks assigned to me from Google Docs or Chat` property, on by default
