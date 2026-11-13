@@ -149,26 +149,12 @@ HTTP_TIMEOUT = 30
 "seconds; without it, a dead network would keep a job (and the jobs queued after it) waiting forever"
 NETWORK_ERRORS = (httplib2.ServerNotFoundError, OSError, Error)
 "no network, a timeout (OSError), an error answer of Google"
-API_VERSIONS = {"tasks": "v1", "sheets": "v4", "calendar": "v3"}
+API_VERSIONS = {"tasks": "v1", "calendar": "v3"}
 TASKS_MISSING = "Google Tasks access not granted yet – add a task from Zim once to grant it"
 BUSY_SUFFIX = " ⟳ Google Tasks"
 "appended to the window title while the jobs talking to Google run"
 INBOX_ICON = "📥"
-"marks the tasks imported from the inbox sheet"
-INBOX_TITLE = "Zim inbox (Google Tasks plugin)"
-INBOX_SHEET = "Inbox"
-INBOX_BANNER = ("📥 Managed by the Google Tasks plugin for Zim. The rows below are imported into Zim as tasks"
-                " at every sync and then deleted from this sheet. Add rows freely, do not change rows 1-2.")
-INBOX_COLUMNS = ("text", "due", "note")
-"the inbox sheet columns, found by the first word of their header in row 2; `text` is required"
-INBOX_HEADER = ("text", "due (YYYY-MM-DD, optional)", "note (optional)")
-INBOX_HEADER_ROWS = 2
-"banner + header, the tasks start below"
-INBOX_MISSING = "Inbox sheet not accessible – run Tools / Google Tasks / Create inbox sheet again"
-INBOX_CLAUDE_PROMPT = (
-    "When I ask you to make a task for me (\"make a task\", \"udělej mi úkol\"…), append a row to the Google Sheet"
-    " {url} (sheet \"Inbox\", columns A-C): text = the task, due = a date YYYY-MM-DD only if I mention one,"
-    " note = optional details. Only append rows, never edit or delete existing ones.")
+"marks the plain Zim tasks imported from the inbox calendar"
 INBOX_CALENDAR_TITLE = "Zim inbox"
 INBOX_CALENDAR_DESCRIPTION = ("📥 Managed by the Google Tasks plugin for Zim. Its events are imported into Zim as tasks"
                               " at every sync and then deleted from this calendar.")
@@ -179,14 +165,13 @@ INBOX_CALENDAR_CLAUDE_PROMPT = (
     " (today if none), description = optional details. Only create events there, never edit or delete them.")
 INBOX_CALENDAR_BATCH = 50
 "events deleted in one batch request (the Calendar API takes up to 50)"
-sheetIdRe = re.compile(r'/spreadsheets/d/([\w-]+)')
 htmlLinkRe = re.compile(r'<a\s[^>]*href="([^"]*)"[^>]*>(.*?)</a>', re.I | re.S)
 activationUrlRe = re.compile(r'https://console\.(?:developers|cloud)\.google\.com/\S+?(?=["\s]|$)')
 
 
 def disabled_api_message(exc):
     """ A readable message if `exc` is the 403 Google returns when the API is not enabled in the Google Cloud
-        project of the OAuth client secret (e.g. the Sheets API for the inbox), else None. """
+        project of the OAuth client secret (e.g. the Calendar API for the inbox), else None. """
     if not isinstance(exc, HttpError) or exc.resp.status != 403:
         return None
     content = exc.content.decode("utf-8", "replace")
@@ -204,42 +189,10 @@ def disabled_api_message(exc):
     return f"{msg} Enable it at {url} and try again in a few minutes." if url else f"{msg} Enable it there."
 
 
-
-
-def parse_sheet_id(value):
-    """ The spreadsheet ID from the `inbox_sheet` preference, which may be its URL or the bare ID. None if empty. """
-    value = (value or "").strip()
-    match = sheetIdRe.search(value)
-    return match[1] if match else value or None
-
-
-def parse_inbox_rows(values):
-    """ Rows of the inbox sheet (`values` as the Sheets API returns them, trailing blanks cut)
-        -> [(row index, text, due, note)] of the rows below the header, blank ones included (with an empty text)
-        so that they get deleted as well.
-        Raises ValueError if the header (row 2) does not name the columns, see INBOX_COLUMNS. """
-    header = values[INBOX_HEADER_ROWS - 1] if len(values) >= INBOX_HEADER_ROWS else []
-    columns = {}
-    for i, cell in enumerate(header):
-        word = (cell.split() or [""])[0].lower()
-        if word in INBOX_COLUMNS and word not in columns:
-            columns[word] = i
-    if "text" not in columns:
-        raise ValueError("Inbox sheet header changed – fix row 2 or run Tools / Google Tasks / Create inbox sheet"
-                         " again")
-
-    def cell(row, name):
-        i = columns.get(name)
-        return row[i].strip() if i is not None and i < len(row) else ""
-
-    return [(index, cell(row, "text"), cell(row, "due"), cell(row, "note"))
-            for index, row in enumerate(values[INBOX_HEADER_ROWS:], INBOX_HEADER_ROWS)]
-
-
 def get_inbox_text(text, due="", note="", start_at_due=False):
-    """ Zim markup of a task from the inbox sheet: a plain Zim task (it does not live in Google Tasks),
+    """ Zim markup of a task from the inbox calendar: a plain Zim task (it does not live in Google Tasks),
         the due date in the Zim notation `<2026-10-28`, the note on the next line(s), as Google Tasks notes are.
-        A row with only a note takes the note as its text. None for a blank row.
+        A task with only a note takes the note as its text. None for a blank one.
         :param start_at_due: A future due date is the start date as well (`>2026-11-11 <2026-11-11`), so that
                              the Zim Task List keeps the task hidden till then. """
     text, note = " ".join(text.split()), note.strip()
@@ -365,9 +318,6 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
                                          '\nStandard Zim notation, ex: ">2021-01-01" means you want'
                                          ' the task to appear not sooner than in January.'), False),
         ('page', 'page', _('Page to be updated (empty = homepage)'), ""),
-        ('inbox_sheet', 'string', _('Inbox sheet (empty = off)'
-                                    '\nFilled in by Tools / Google Tasks / Create inbox sheet. Its rows are imported'
-                                    ' as tasks, then deleted from the sheet.'), ""),
         ('inbox_calendar', 'string', _('Inbox calendar (empty = off)'
                                        '\nFilled in by Tools / Google Tasks / Create inbox calendar. Its events are'
                                        ' imported as tasks, then deleted from the calendar.'), ""),
@@ -454,13 +404,9 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
 
 
 class GoogleApi:
-    """ The Google services (Tasks, and the inbox Sheets and Calendar), each scope with its own credentials file """
+    """ The Google services (Tasks, and the inbox Calendar), each scope with its own credentials file """
     permission_write_file = os.path.join(WORKDIR, 'googletasks_oauth_write.json')
     permission_read_file = os.path.join(WORKDIR, 'googletasks_oauth.json')
-    permission_inbox_file = os.path.join(WORKDIR, 'googletasks_oauth_inbox.json')
-    inbox_scope = 'https://www.googleapis.com/auth/drive.file'
-    """ Only the files the plugin created itself – the inbox sheet. Unlike the `spreadsheets` scope
-        (every sheet of the user), it is not a sensitive one, Google needs no verification of the app for it. """
     permission_inbox_calendar_file = os.path.join(WORKDIR, 'googletasks_oauth_calendar.json')
     inbox_calendar_scope = 'https://www.googleapis.com/auth/calendar.app.created'
     """ Only the calendars the plugin created itself – the inbox calendar. The other calendars of the user
@@ -482,10 +428,6 @@ class GoogleApi:
                                  'tasks', TASKS_MISSING, claim)
         return self._service(GoogleApi.permission_read_file, 'https://www.googleapis.com/auth/tasks.readonly',
                              'tasks', TASKS_MISSING, claim)
-
-    def get_inbox_services(self, claim=False):
-        """ Sheets service for the inbox sheet, with their own credentials (see inbox_scope). """
-        return self._service(GoogleApi.permission_inbox_file, GoogleApi.inbox_scope, 'sheets', INBOX_MISSING, claim)
 
     def get_inbox_calendar_service(self, claim=False):
         """ Calendar service for the inbox calendar, with its own credentials (see inbox_calendar_scope). """
@@ -745,7 +687,6 @@ class GoogletasksWindow(MainWindowExtension):
                                     <menuitem action='send_as_task'/>
                                     <menuitem action='add_new_task'/>
                                     <menuitem action='import_history'/>
-                                    <menuitem action='create_inbox'/>
                                     <menuitem action='create_inbox_calendar'/>
                                     ''' + "\n".join(permissions) + '''
                                     <menu action='choose_task_list'>
@@ -870,26 +811,6 @@ class GoogletasksWindow(MainWindowExtension):
         if self.controller.preferences["auto_sync"]:
             self.sync_status()
         self.controller.background(lambda: self.controller.fetch(force=True, all_history=all_history), "import")
-
-    @action(_('Create _inbox sheet...'))  # T: menu item
-    def create_inbox(self):
-        """ Create the inbox sheet (or show the one already set) and how to tell Claude about it. """
-        def job():
-            url = self.controller.create_inbox()
-            if url:  # not waited for, the dialog would hold the jobs queued after this one
-                GLib.idle_add(self._show_inbox, url)
-        self.controller.background(job, "inbox")
-
-    def _show_inbox(self, url):
-        self._show_inbox_dialog(
-            _("Inbox sheet is ready"), url,
-            f"{url}\n\nWhatever is added to its rows gets imported here as a task {INBOX_ICON} at every sync"
-            " and deleted from the sheet. Its name, banner and header say so to anyone who opens it.\n\n"
-            "To let Claude (e.g. in the mobile app, which reaches the sheet through its Google Drive / Sheets"
-            " connector) add tasks there, paste this into its instructions"
-            " (claude.ai / Settings / Profile, or a project's instructions):\n\n", INBOX_CLAUDE_PROMPT.format(url=url),
-            _("_Open sheet"))
-        return False  # once (GLib.idle_add)
 
     @action(_('Create inbox _calendar...'))  # T: menu item
     def create_inbox_calendar(self):
@@ -1563,8 +1484,7 @@ class GoogletasksController:
         """
         if all_history:
             force = True
-        # independent of the tasks, they are not throttled: the inbox should not wait
-        self.import_inbox()
+        # independent of the tasks, it is not throttled: the inbox should not wait
         self.import_inbox_calendar()
 
         # Set the date since that we fetch the tasks
@@ -1666,105 +1586,13 @@ class GoogletasksController:
         if save:
             save()
 
-    def _inbox_sheet(self, sheets, sheet_id):
-        """ (title, numeric sheetId) of the first sheet of the inbox spreadsheet """
-        properties = sheets.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets.properties").execute()
-        first = properties["sheets"][0]["properties"]
-        return first["title"], first["sheetId"]
-
-    def import_inbox(self):
-        """ Import the rows of the inbox sheet (the `inbox_sheet` preference) as tasks and delete them from the sheet.
-            Does nothing if no sheet is set. Returns the number of tasks imported (None on error). """
-        sheet_id = parse_sheet_id(self.preferences["inbox_sheet"])
-        if not sheet_id:
-            return 0
-        try:
-            sheets = self.api.get_inbox_services()
-            title, grid_id = self._inbox_sheet(sheets, sheet_id)
-            values = sheets.spreadsheets().values().get(
-                spreadsheetId=sheet_id, range="'{}'!A:Z".format(title.replace("'", "''"))).execute().get("values", [])
-        except LookupError as e:
-            self.error(str(e))
-            return None
-        except (*NETWORK_ERRORS, KeyError, IndexError) as e:
-            self.error(INBOX_MISSING, e)
-            return None
-        try:
-            rows = parse_inbox_rows(values)
-        except ValueError as e:
-            self.error(str(e))
-            return None
-        if not rows:
-            return 0
-        texts = [text for text in (get_inbox_text(*row[1:]) for row in rows) if text]
-        if texts and not self._when_free("the inbox sheet", self._insert_inbox, texts):  # the rows stay there
-            return None
-        # bottom up, so that the indexes of the rows still to delete do not move; rows added meanwhile go below
-        requests = [{"deleteDimension": {"range": {"sheetId": grid_id, "dimension": "ROWS",
-                                                   "startIndex": index, "endIndex": index + 1}}}
-                    for index, *_row in sorted(rows, reverse=True)]
-        try:
-            sheets.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
-        except NETWORK_ERRORS as e:
-            self.error("Tasks imported from the inbox sheet, but not deleted from it – delete them by hand,"
-                       " else they are imported again", e, fatal=True)
-        return len(texts)
-
-    def _insert_inbox(self, texts, source="inbox sheet"):
+    def _insert_inbox(self, texts):
         page = self._insert_lines(texts)
-        self.info(f"New tasks from the {source}: {len(texts)}, page: {page.get_title()}")
-
-    def create_inbox(self):
-        """ Create the inbox sheet and set it in the preferences. If one is set and accessible already,
-            just return it. Returns its URL, None on error. """
-        try:
-            sheets = self.api.get_inbox_services(claim=True)
-        except Exception as e:  # OAuth flow, missing/invalid client secret, network...
-            self.error("Cannot connect to Google Sheets", e, fatal=True)
-            return None
-        sheet_id = parse_sheet_id(self.preferences["inbox_sheet"])
-        if sheet_id:
-            try:
-                self._inbox_sheet(sheets, sheet_id)
-                return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-            except (*NETWORK_ERRORS, KeyError, IndexError) as e:
-                self.info(f"The inbox sheet set is not accessible, creating a new one: {e}")
-
-        def cells(texts, bold, background):
-            return {"values": [{"userEnteredValue": {"stringValue": text},
-                                "userEnteredFormat": {"textFormat": {"bold": bold}, "wrapStrategy": "WRAP",
-                                                      "backgroundColor": background}} for text in texts]}
-
-        widths = (400, 180, 300)
-        try:
-            spreadsheet = sheets.spreadsheets().create(body={
-                "properties": {"title": INBOX_TITLE},
-                "sheets": [{"properties": {"title": INBOX_SHEET, "gridProperties": {"frozenRowCount": 2}},
-                            "data": [{"rowData": [cells([INBOX_BANNER], True, {"red": 1, "green": .87, "blue": .6}),
-                                                  cells(INBOX_HEADER, True, {"red": .9, "green": .9, "blue": .9})],
-                                      "columnMetadata": [{"pixelSize": w} for w in widths]}]}]
-            }).execute()
-            sheet_id = spreadsheet["spreadsheetId"]
-            grid_id = spreadsheet["sheets"][0]["properties"]["sheetId"]
-            sheets.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": [
-                {"mergeCells": {"range": {"sheetId": grid_id, "startRowIndex": 0, "endRowIndex": 1,
-                                          "startColumnIndex": 0, "endColumnIndex": len(widths)},
-                                "mergeType": "MERGE_ALL"}},
-                # editing the banner or header is possible, only after a warning
-                {"addProtectedRange": {"protectedRange": {
-                    "range": {"sheetId": grid_id, "startRowIndex": 0, "endRowIndex": INBOX_HEADER_ROWS},
-                    "description": "Managed by the Google Tasks plugin for Zim", "warningOnly": True}}},
-            ]}).execute()
-        except (*NETWORK_ERRORS, KeyError, IndexError) as e:
-            self.error("Cannot create the inbox sheet", e, fatal=True)
-            return None
-        on_main(self._set_preference, "inbox_sheet", spreadsheet["spreadsheetUrl"])
-        self.info(f"Inbox sheet created: {spreadsheet['spreadsheetUrl']}")
-        return spreadsheet["spreadsheetUrl"]
+        self.info(f"New tasks from the inbox calendar: {len(texts)}, page: {page.get_title()}")
 
     def _set_preference(self, name, value):
         """ Set the notebook property and save them – Zim itself writes notebook.zim only from its Properties
-            dialog, the inbox sheet/calendar would be forgotten at the next start. """
+            dialog, the inbox calendar would be forgotten at the next start. """
         self.preferences[name] = value
         self.notebook.config.write()
 
@@ -1806,7 +1634,7 @@ class GoogletasksController:
         else:
             texts = [text for text in (get_inbox_text(*get_event_task(e), start_at_due=True) for e in events) if text]
             done, task_ids, passed = events, [], []
-        if texts and not self._when_free("the inbox calendar", self._insert_inbox, texts, "inbox calendar"):
+        if texts and not self._when_free("the inbox calendar", self._insert_inbox, texts):
             # the events stay in the calendar, imported next time (their Google Tasks are not made twice,
             # see Cache.inbox_tasks); those whose tasks come with the import of the list go
             self._delete_inbox_events(calendar, calendar_id, passed)

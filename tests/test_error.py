@@ -44,22 +44,24 @@ def http_error(gt, status, body):
 
 
 def test_disabled_api_is_explained_with_the_activation_link(gt, capsys):
-    url = "https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=123"
-    body = ('{"error": {"code": 403, "message": "Google Sheets API has not been used in project 123 before or it is'
+    url = "https://console.developers.google.com/apis/api/calendar-json.googleapis.com/overview?project=123"
+    body = ('{"error": {"code": 403, "message": "Google Calendar API has not been used in project 123 before or it is'
             ' disabled. Enable it by visiting ' + url + ' then retry.", "status": "PERMISSION_DENIED", "details": ['
             '{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "SERVICE_DISABLED",'
-            ' "metadata": {"serviceTitle": "Google Sheets API", "activationUrl": "' + url + '"}}]}}')
+            ' "metadata": {"serviceTitle": "Google Calendar API", "activationUrl": "' + url + '"}}]}}')
     assert gt.disabled_api_message(http_error(gt, 403, body)) == (
-        f"Google Sheets API is not enabled in the Google Cloud project of the OAuth client secret."
+        f"Google Calendar API is not enabled in the Google Cloud project of the OAuth client secret."
         f" Enable it at {url} and try again in a few minutes.")
     # older format, without details: the link is taken from the message
-    old = '{"error": {"errors": [{"reason": "accessNotConfigured"}], "message": "Enable it by visiting ' + url + ' then"}}'
+    old = ('{"error": {"errors": [{"reason": "accessNotConfigured"}],'
+           ' "message": "Enable it by visiting ' + url + ' then"}}')
     assert url in gt.disabled_api_message(http_error(gt, 403, old))
-    make(gt).error("Cannot create the inbox sheet", http_error(gt, 403, body))
-    assert "Google Sheets API is not enabled" in capsys.readouterr().err
+    make(gt).error("Cannot create the inbox calendar", http_error(gt, 403, body))
+    assert "Google Calendar API is not enabled" in capsys.readouterr().err
 
 
 def test_other_errors_are_kept(gt):
-    assert gt.disabled_api_message(http_error(gt, 403, '{"error": {"message": "The caller does not have permission"}}')) is None
+    denied = '{"error": {"message": "The caller does not have permission"}}'
+    assert gt.disabled_api_message(http_error(gt, 403, denied)) is None
     assert gt.disabled_api_message(http_error(gt, 500, '{"error": {"reason": "SERVICE_DISABLED"}}')) is None
     assert gt.disabled_api_message(ValueError("x")) is None

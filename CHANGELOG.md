@@ -11,7 +11,6 @@
 * enh: `Task from cursor or selection` takes the date of the line (`<2026-11-11` or `>2026-11-11` in small markup) into the dialog, and leaves the checkbox and 📥 out of the title
 * fix: a tick the server refused was put back into the page only when the page was still open (otherwise lost, or the stale copy could later overwrite what cron wrote meanwhile); now through the page file, and a task line deleted meanwhile comes back to the top of its page; only the newest un/tick of a task is reverted; a task deleted on the server is not reverted
 * fix: `Task from cursor or selection` (Ctrl+Alt+Shift+G) took the lines below the task up to a ✋ task only, swallowing Zim's own tasks, 📥 tasks or tasks of other lists; now stops at any checkbox, heading or blank line (bulleted lines are taken as notes)
-* new: inbox sheet – rows of a Google Sheet are imported as tasks 📥 and deleted from it, so that e.g. Claude in the mobile app can add tasks (`Tools / Google Tasks / Create inbox sheet...`, off by default)
 * fix: the caret jumped to the end of the page when tasks were imported into the open page (also by `zim --plugin googletasks` from cron while Zim is running)
 * fix: the nightly `zim --plugin googletasks` imported only the default task list, ignoring the lists chosen in the notebook properties
 
@@ -44,4 +43,4 @@
 * relative postponing buttons  
 
 # 1.0 (2018-06-18) 0.68 compatible
-Fully working version, last compatible with Zim 0.68 and older. Current master supports only newer versions. 
+Fully working version, last compatible with Zim 0.68 and older. Current main supports only newer versions. 

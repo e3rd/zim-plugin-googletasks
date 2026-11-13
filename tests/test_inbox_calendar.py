@@ -6,12 +6,21 @@ import types
 import pytest
 
 from test_fetch import FakeCache, FakeNotebook, FakePage
-from test_inbox import Request
 
 CAL = "c_abc@group.calendar.google.com"
 TODAY = datetime.date.today().isoformat()
 LATER = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
 "a future event, the Google Task made of it is not put into the page"
+
+
+class Request:
+    def __init__(self, result=None, error=None):
+        self.result, self.error = result, error
+
+    def execute(self):
+        if self.error:
+            raise self.error
+        return self.result
 
 
 def event(event_id, summary="", date=TODAY, **kwargs):
@@ -135,6 +144,19 @@ def prague(monkeypatch):
 ])
 def test_event_task(gt, ev, expected, prague):
     assert gt.get_event_task(ev) == expected
+
+
+@pytest.mark.parametrize("args, expected", [
+    (("  Call   Bob ",), "[ ] 📥 Call Bob"),
+    (("Call Bob", "2026-10-28"), "[ ] 📥 Call Bob _{//<2026-10-28//}"),
+    (("Call Bob", "28 Oct 2026"), "[ ] 📥 Call Bob _{//<2026-10-28//}"),
+    (("Call Bob", "someday"), "[ ] 📥 Call Bob (due: someday)"),
+    (("Call Bob", "", "about the roof\nand the bill"), "[ ] 📥 Call Bob\nabout the roof\nand the bill"),
+    (("", "", "only a note"), "[ ] 📥 only a note"),
+    (("", "", ""), None),
+])
+def test_inbox_text(gt, args, expected):
+    assert gt.get_inbox_text(*args) == expected
 
 
 def test_zim_task_of_a_future_event_starts_on_its_day(gt):

@@ -33,25 +33,17 @@ By default the plugin uses the bundled `googletasks_client_id.json`. If it hits 
 
 The env var wins over the file, the file wins over the bundled secret. Already granted OAuth tokens belong to the client they were issued for, so after switching, re-grant them via `Tools / Google Tasks / Claim ... access`.
 
-### Inbox sheet: tasks from Claude (optional, off by default)
-A Google Sheet whose rows get imported as tasks 📥 at every sync (`Import new tasks`, on startup or from cron) and then deleted from it – so it stays empty. Meant for adding tasks from places that can write to a Google Sheet but not to Google Tasks, e.g. Claude in the mobile app ("make me a task …"), through its Google Drive / Sheets connector. You can add rows by hand, too.
-* `Tools / Google Tasks / Create inbox sheet...` – asks for one more permission in the browser (access to the files the plugin creates itself, nothing else), creates `Zim inbox (Google Tasks plugin)` in your Google Drive and sets it in `File / Properties / Google Tasks / Inbox sheet`. No token to copy anywhere.
-* The dialog then shows the sheet and a ready-made instruction to paste into Claude (`claude.ai / Settings / Profile`, or a project's instructions); `Copy instructions for Claude` puts it into the clipboard. When the sheet is set already, the menu item just shows the dialog again.
-* Rows 1-2 (a banner saying the sheet is managed by the plugin and the column header `text | due | note`) are frozen and protected by a warning. Columns are found by the header, so if it gets changed, nothing is imported or deleted until it is fixed.
-* An imported row is a plain Zim task (not a Google task), `due` becomes a Zim due date (`<2026-10-28`), `note` the next line.
-* To turn it off, empty the `Inbox sheet` property.
-* Needs the **Google Sheets API** enabled in the Google Cloud project of the client secret (else the plugin says so, with a link to enable it).
-
 ### Inbox calendar: tasks from your phone's calendar or Claude (optional, off by default)
-The same idea as the inbox sheet (both may be on at once), but a Google Calendar: what waits for Zim is seen in the calendar on the phone, among your other events, and is quick to add there.
+A Google Calendar whose events get imported as tasks at every sync (`Import new tasks`, on startup or from cron) and then deleted from it – so it stays empty. Meant for adding tasks from places that cannot write to Google Tasks, e.g. Claude in the mobile app ("make me a task …"), through its Google Calendar connector; what waits for Zim is seen in the calendar on the phone, among your other events, and is quick to add there.
 * `Tools / Google Tasks / Create inbox calendar...` – asks for one more permission in the browser: to create calendars and manage the events in them. The plugin sees **only the calendars it created itself**, your other calendars do not exist for it (reading, changing or deleting them ends with "not found"). Creates the calendar `Zim inbox` and sets it in `File / Properties / Google Tasks / Inbox calendar`.
 * At every sync, all its events are imported – the future ones too – and deleted from the calendar. The day of the event becomes the due date, the time of a timed event (`14:00–15:30`) leads the text, an end on another day follows it (`(until 2026-11-14)`); the description, the place and the video call link go to the next line(s). A future event as a plain Zim task gets its day as the start date as well (`>2026-11-11 <2026-11-11`), so that Zim's Task List keeps it hidden till then.
 * Repeated events are left in the calendar (reported at every sync): deleting one would delete the whole series and a task cannot repeat.
-* `Inbox calendar: make Google Tasks of its events in this list` – empty: plain Zim tasks 📥 like from the sheet; a list title (or `@default`): each event becomes a Google Task of that list (needs the write access to Google Tasks), so it is seen in Google Tasks, too, and its checkbox syncs. A future event only passes through: its Google Task is due on its day and comes into Zim with the usual import then (if the list is one of the imported `Task lists`, else at once).
+* `Inbox calendar: make Google Tasks of its events in this list` – empty: plain Zim tasks 📥 (not Google Tasks); a list title (or `@default`): each event becomes a Google Task of that list (needs the write access to Google Tasks), so it is seen in Google Tasks, too, and its checkbox syncs. A future event only passes through: its Google Task is due on its day and comes into Zim with the usual import then (if the list is one of the imported `Task lists`, else at once).
 * A task line turned into a Google Task (`Task from cursor or selection`) gives its date to the dialog.
 * The dialog shows a ready-made instruction for Claude, whose Google Calendar connector then creates the events (it needs the permission to create events; in claude.ai you may allow it just that tool without asking).
 * Needs the **Google Calendar API** enabled in the Google Cloud project of the client secret.
-* Measured: an import of the calendar takes ~0.7 s, of the sheet ~2 s.
+* To turn it off, empty the `Inbox calendar` property.
+* Measured: an import of the calendar takes ~0.7 s.
 
 ### Optional
 If you want to synchronise automatically, I recommend using `anacron`. This line helps me get synchronised at 7:30 AM or 5 minutes after computer launch (Ubuntu 17.04) even without restarting Zim:
@@ -64,11 +56,11 @@ The plugin touches Zim internals, so the exact Zim version matters. The one diff
 
 | Zim version | Plugin version | Notes |
 |---|---|---|
-| 0.68 and older | 1.0 (tag `0.68`) | Last version for the old Zim; current master does not work with it. |
+| 0.68 and older | 1.0 (tag `0.68`) | Last version for the old Zim; current main does not work with it. |
 | 0.74 | 1.1 (tag `1.1`) | Plugin options became Notebook properties. Uses `XDG_DATA_HOME.subdir`. |
 | 0.74.2 (develop) | commit `9a6c741` | Switched to `XDG_DATA_HOME.folder`. |
-| 0.74.3 | commit `5c5e12d` | Switched back to `XDG_DATA_HOME.subdir`. **Current master is not tested with it** – if it fails on `WORKDIR`, change `.folder` to `.subdir`. |
-| 0.75 and newer | current master | Uses `XDG_DATA_HOME.folder`. |
+| 0.74.3 | commit `5c5e12d` | Switched back to `XDG_DATA_HOME.subdir`. **Current main is not tested with it** – if it fails on `WORKDIR`, change `.folder` to `.subdir`. |
+| 0.75 and newer | current main | Uses `XDG_DATA_HOME.folder`. |
 
 ## How the propagation works?
  * When importing, the task will preserve it's Google-ID (and the ID of its list) in a small link to the task in Google Tasks, ex: `[[https://tasks.google.com/task/<task>?list=<list>|💼]]` – click it to open the task in the browser; the icon tells the lists apart. Links written by older versions (`gtasks://<list>/<task>`, or just `gtasks://<task>` belonging to the first chosen list) still work.
