@@ -1,3 +1,8 @@
+# Unreleased
+* enh: tasks status is synced from the server after every import (startup, menu, cron), cheaply: only the tasks changed since the last sync are asked for (a request or two per list, ~0.2 s), including tasks of lists no longer imported and tasks completed in Google's own apps; the `Sync tasks status before import` property is gone
+* enh: `Sync tasks status from server` asks for all the tasks on the page in batches (a few requests, ~1 s instead of one per task, ~15 s for 135 tasks)
+* enh: the status sync rewrites the page only when a checkbox changes
+
 # 1.3 (2026-11-13)
 * fix: ticking a task on the very last line of a page (no newline after it) was not sent to the server
 * fix: the task dialog logged a false "Not yet implemented" error for every task with a date

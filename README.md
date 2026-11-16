@@ -66,7 +66,7 @@ The plugin touches Zim internals, so the exact Zim version matters. The one diff
  * When importing, the task will preserve it's Google-ID (and the ID of its list) in a small link to the task in Google Tasks, ex: `[[https://tasks.google.com/task/<task>?list=<list>|💼]]` – click it to open the task in the browser; the icon tells the lists apart. Links written by older versions (`gtasks://<list>/<task>`, or just `gtasks://<task>` belonging to the first chosen list) still work.
  * When creating or updating a task, the dialog lets you choose its list (if more are chosen); changing it for an existing task moves it on the server.
  * If you complete the checkbox of zim-task, the plugin searches for this link and marks the task completed on server.
- * If you synchronize tasks status from server, every task on the task page will become un/checked according to the server status.
+ * After every import (on startup, from the menu or from cron) the status is synced: tasks on the page un/checked on the server since the last sync (in any app) get un/checked in Zim too – a cheap request per list. `Sync tasks status from server` asks for every task on the page.
 
 ### Multiple Zim instances
 Every Zim notebook can use independent task list. If they use the same list, any task will be imported into both.

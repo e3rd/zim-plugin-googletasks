@@ -165,6 +165,11 @@ INBOX_CALENDAR_CLAUDE_PROMPT = (
     " (today if none), description = optional details. Only create events there, never edit or delete them.")
 INBOX_CALENDAR_BATCH = 50
 "events deleted in one batch request (the Calendar API takes up to 50)"
+TASKS_BATCH = 50
+"tasks asked for in one batch request by the full status sync"
+SYNC_OVERLAP = 300
+""" seconds the incremental status sync looks back before its cursor: clocks differ, and `updated` of a task
+    may be a bit older than its `completed` """
 htmlLinkRe = re.compile(r'<a\s[^>]*href="([^"]*)"[^>]*>(.*?)</a>', re.I | re.S)
 activationUrlRe = re.compile(r'https://console\.(?:developers|cloud)\.google\.com/\S+?(?=["\s]|$)')
 
@@ -309,8 +314,6 @@ See `File / Properties / Google Tasks` for options, `Tools / Google Tasks` for a
         # T: label for plugin preferences dialog
         ('startup_check', 'bool', _('Import new tasks on Zim startup'
                                     '\nIncludes today\'s or since last time due date tasks'), True),
-        ('auto_sync', 'bool', _('Sync tasks status before import'
-                                '\nMay take a long time, notably if tasks on the page are older than 14 days.'), False),
         ('include_undated', 'bool', _('Import tasks without a due date'
                                       '\nEach one only once, when it first appears.'), True),
         ('include_assigned', 'bool', _('Import tasks assigned to me from Google Docs or Chat'), True),
@@ -392,13 +395,13 @@ class GoogletasksCommand(NotebookCommand, GtkCommand):
         # a new windowless one would replace it in ntb.plugin_googletasks and throw the caret to the page end.
         controller = getattr(ntb, "plugin_googletasks", None)
         if controller and controller.window:
-            controller.background(lambda: controller.fetch(True), "import")
+            controller.import_and_sync(force=True)
             return  # we are inside the GUI process, no exit code reaches cron
         # the notebook properties, as the GUI uses them; preferences.conf holds only their defaults
         # (reading it imported just the default task list, not the ones chosen for the notebook)
         preferences = GoogletasksPlugin().notebook_properties(ntb)
         controller = GoogletasksController(notebook=ntb, preferences=preferences)
-        controller.fetch(True)  # add new lines
+        controller.import_and_sync(force=True)  # add new lines, then the status
         if controller.failed:
             sys.exit(1)  # let cron/anacron notice
 
@@ -648,7 +651,7 @@ class GoogletasksWindow(MainWindowExtension):
         MainWindowExtension.__init__(self, plugin, window)  # super(WindowExtension, self).__init__(*args, **kwargs)
 
         if self.plugin.preferences['startup_check']:
-            controller.background(controller.fetch, "import")
+            controller.import_and_sync()
 
     def _add_actions(self, uimanager):
         """ Set up menu items.
@@ -808,9 +811,7 @@ class GoogletasksWindow(MainWindowExtension):
         self._import(all_history=True)
 
     def _import(self, all_history=False):
-        if self.controller.preferences["auto_sync"]:
-            self.sync_status()
-        self.controller.background(lambda: self.controller.fetch(force=True, all_history=all_history), "import")
+        self.controller.import_and_sync(force=True, all_history=all_history)
 
     @action(_('Create inbox _calendar...'))  # T: menu item
     def create_inbox_calendar(self):
@@ -856,9 +857,7 @@ class GoogletasksWindow(MainWindowExtension):
 
     @action(_('_Sync tasks status from server'))  # T: menu item
     def sync_status(self):
-        # the checkboxes as they are now: a tick from now on goes to the server after the sync, which must not undo it
-        before = self.controller.page_tasks()
-        self.controller.background(lambda: self.controller.sync_bullets_from_server(before), "sync")
+        self.controller.queue_sync(full=True)
 
     @action(_('_Refresh task lists'))  # T: menu item
     def refresh_task_lists(self):
@@ -1778,59 +1777,148 @@ class GoogletasksController:
                 tasks[task_id] = (list_id, match[1], match[4])
         return tasks
 
-    def sync_bullets_from_server(self, before):
-        """ Loops tasks found on the page and un/check them according to the Google server task status.
-            :param before: page_tasks() taken when the sync was queued; a checkbox changed since is left as is """
+    def import_and_sync(self, force=False, all_history=False):
+        """ Queue the import (see fetch), then the incremental status sync, also when the import is throttled:
+            the sync is cheap. A failing sync leaves the import be, it is a job of its own. After an import
+            that failed, the sync is left for the next time: offline, it would only report the same again. """
+        before = self.page_tasks()  # see queue_sync
+        imported = [True]
 
-        service = self.api.get_service(info="Syncing tasks status")
-
-        # build status cache from last 14 days so that we have to fetch one by one as little tasks as possible
-        try:
-            items, _complete = self._read_chosen_lists(self.get_time(add_days=-14, mode="midnight"),
-                                                       show_completed=True, service=service)
-        except LookupError:
-            return False
-        cache = {task["id"]: task["status"] == "completed" for task, _list_id, _icon in items}
-
-        unidentified_tasks = []
-        for task_id, (list_id, _checkbox, task_text) in before.items():
-            if task_id in cache:
-                continue
-            # perform single search, this task was not fetched within the cache
+        def job():
+            failed, self.failed = self.failed, False
             try:
-                task = service.tasks().get(task=task_id, tasklist=list_id or self.primary_list_id).execute()
-            except Error as e:
-                logger.warning("Task %s not found on the server: %s", task_id, e)
-                unidentified_tasks.append(task_text)
-                cache[task_id] = None  # not asked again for the same task on the page
-            except (LookupError, httplib2.ServerNotFoundError, OSError) as e:  # OSError: timeout, no network
-                self.error("Cannot look up task status", e)
-                break
+                self.fetch(force=force, all_history=all_history)
+            finally:
+                imported[0] = not self.failed
+                self.failed = self.failed or failed
+
+        self.background(job, "import")
+        self.background(lambda: imported[0] and self.sync_bullets_from_server(before), "sync")
+
+    def queue_sync(self, full=False):
+        """ Queue the status sync. The checkboxes are taken now (in the main thread): a tick from now on
+            goes to the server after the sync, which must not undo it. """
+        before = self.page_tasks()
+        self.background(lambda: self.sync_bullets_from_server(before, full), "sync")
+
+    def sync_bullets_from_server(self, before, full=False):
+        """ Un/check the tasks on the page according to their status on the server.
+
+        Incremental: only the tasks updated since the last sync (`Cache.last_synced`, minus SYNC_OVERLAP),
+        a couple of requests per list whatever the page size. Full (also when there was no sync yet):
+        every task on the page, see _read_statuses. The cursor moves on only if all was read and the page written.
+        :param before: page_tasks() taken when the sync was queued; a checkbox changed since is left as is
+        :return: True if done completely
+        """
+        self.cache.load()
+        full = full or not self.cache.last_synced
+        cursor = time()  # taken before asking: what changes meanwhile is asked for again next time
+        try:
+            service = self.api.get_service(info=f"Syncing tasks status{' (full)' if full else ''}")
+        except Exception as e:  # OAuth flow, missing/invalid client secret, network...
+            self.error("Cannot connect to Google Tasks", e)
+            return False
+        if full:
+            statuses, complete = self._read_statuses(service, before)
+        else:
+            statuses, complete = self._read_updated(service, before, self.cache.last_synced - SYNC_OVERLAP)
+        if statuses and not self._when_free("tasks status", self._set_bullets, statuses, before):
+            return False
+        if complete:
+            self.cache.load()
+            self.cache.last_synced = cursor
+            self.cache.save()
+        return complete
+
+    def _read_updated(self, service, before, since):
+        """ {task_id: completed} of the page tasks updated on the server since the timestamp. Every list the page
+            refers to is asked, not only the chosen ones: the page keeps the tasks of a list unchosen later.
+            A list gone from the server is skipped, its tasks cannot change any more.
+            :return: (statuses, complete) - complete is False if a list could not be read """
+        updated_min = datetime.datetime.fromtimestamp(since, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        statuses = {}
+        try:
+            list_ids = {list_id or self.primary_list_id for list_id, _box, _text in before.values()}
+        except LookupError as e:
+            self.error("Cannot sync tasks status", e)
+            return statuses, False
+        complete = True
+        for list_id in list_ids:
+            page_token = None
+            try:
+                while True:
+                    # showHidden: the tasks completed in Google's own apps are hidden, missing otherwise;
+                    # showAssigned: the page may hold assigned ones whatever include_assigned is now
+                    results = service.tasks().list(tasklist=list_id, updatedMin=updated_min, showCompleted=True,
+                                                   showHidden=True, showAssigned=True, maxResults=100,
+                                                   pageToken=page_token).execute()
+                    statuses.update((task["id"], task.get("status") == "completed")
+                                    for task in results.get("items", []) if task.get("id") in before)
+                    page_token = results.get("nextPageToken")
+                    if not page_token:
+                        break
+            except NETWORK_ERRORS as e:
+                if isinstance(e, HttpError) and e.resp.status in (404, 410):  # deleted, must not block the cursor
+                    logger.warning("[Googletasks] Task list %s not on the server any more: %s", list_id, e)
+                    continue
+                self.error("Cannot sync tasks status", e)
+                complete = False
+        return statuses, complete
+
+    def _read_statuses(self, service, before):
+        """ {task_id: completed} of all the tasks on the page, asked for in batches (TASKS_BATCH per request).
+            A task the server does not know (deleted, a bad ID) is reported and left out.
+            :return: (statuses, complete) - complete is False if some task could not be asked for """
+        statuses, unknown, failed = {}, [], []
+
+        def got(task_id, response, exc):
+            if exc is None:
+                statuses[task_id] = response.get("status") == "completed"
+            elif isinstance(exc, HttpError) and exc.resp.status in (400, 404, 410):
+                logger.warning("Task %s not found on the server: %s", task_id, exc)
+                unknown.append(before[task_id][2])
             else:
-                cache[task_id] = task["status"] == "completed"
-        on_main(self._set_bullets, cache, before)
-        if unidentified_tasks:
-            self.info(f"Cannot identify {len(unidentified_tasks)} tasks: " + ", ".join(unidentified_tasks))
+                failed.append(exc)
+
+        try:
+            ids = [(task_id, list_id or self.primary_list_id) for task_id, (list_id, _box, _text) in before.items()]
+            for i in range(0, len(ids), TASKS_BATCH):
+                batch = service.new_batch_http_request(callback=got)
+                for task_id, list_id in ids[i:i + TASKS_BATCH]:
+                    batch.add(service.tasks().get(tasklist=list_id, task=task_id), request_id=task_id)
+                batch.execute()
+        except (LookupError, *NETWORK_ERRORS) as e:  # LookupError: unknown primary list
+            failed.append(e)
+        if unknown:
+            self.info(f"Cannot identify {len(unknown)} tasks: " + ", ".join(unknown))
+        if failed:
+            self.error("Cannot look up task status", failed[0])
+        return statuses, not failed
 
     def _set_bullets(self, statuses, before):
-        """ Un/check the tasks on the page by {task_id: completed} (None = unknown, left as is).
+        """ Un/check the tasks on the page by {task_id: completed} (missing or None = unknown, left as is).
             The page is read again, it may have changed while the server was asked. A checkbox that differs
             from `before` (see page_tasks) has been un/ticked by the user meanwhile: the server status is older
-            and the tick is sent after the sync, so it is left as is. So is a task not on the page before. """
+            and the tick is sent after the sync, so it is left as is. So is a task not on the page before.
+            The page is stored only if a line changed. Returns whether it was. """
         page = self._get_page()
         contents = []
+        changed = False
         for line in page.dump("wiki"):
             indent, match = task_line(line)
             if match:
                 _list_id, task_id = parse_task_href(match[2])
                 completed = statuses.get(task_id)
                 if completed is not None and task_id in before and before[task_id][1] == match[1]:
-                    # strip "[.] " (a dot may be "*", "x", " ") from the beginning
-                    task_s_without_bullet = match[0][(len(match[1]) if match[1] else 0):]
-                    # put "[*]" or "[ ]" to the beginning
-                    line = indent + "[{0}] {1}".format(("*" if completed else " "), task_s_without_bullet) + "\n"
+                    # "[.] " (a dot may be "*", "x", " ") replaced by "[*] " or "[ ] ", the line end kept
+                    rest = line[len(indent) + (len(match[1]) if match[1] else 0):]
+                    new = indent + ("[*] " if completed else "[ ] ") + rest
+                    changed |= new != line
+                    line = new
             contents.append(line)
-        self._store_to_page(contents, page)
+        if changed:
+            self._store_to_page(contents, page)
+        return changed
 
     def refresh_task_lists(self):
         self.cache.load()
@@ -1876,6 +1964,8 @@ class Cache:
             once it is in the page. """
         self.last_fetched = 0
         "get initial datetime"
+        self.last_synced = 0
+        "when the last status sync started that read everything (0 = never), the cursor of the incremental one"
 
     def load(self):
         """ (Re)read the cache file whenever it changed on disk since we last looked: the headless command
@@ -1889,7 +1979,7 @@ class Cache:
                 logger.warning("Cannot read cache %s, starting with an empty one: %s", self._path, e)
                 data, migrated = None, False
             data = data or {"items_ids": set(), "undated_ids": set(), "lists": {}, "icons": {}, "inbox_tasks": {},
-                            "last_fetched": 0}
+                            "last_fetched": 0, "last_synced": 0}
             self.__dict__.update(data)
             self._mtime = mtime
             if migrated:
@@ -1898,11 +1988,11 @@ class Cache:
 
     @staticmethod
     def parse(text):
-        """ Cache file content -> ({items_ids, lists, last_fetched}, migrated) or (None, False) if unusable.
+        """ Cache file content -> ({items_ids, lists, last_fetched, ...}, migrated) or (None, False) if unusable.
 
         Current format: {"version": 1, "items_ids": [...], "undated_ids": [...], "lists": {...}, "icons": {...},
-         "inbox_tasks": {...}, "last_fetched": float}. (`undated_ids`, `icons` and `inbox_tasks` were added later,
-         a file without them is fine.)
+         "inbox_tasks": {...}, "last_fetched": float, "last_synced": float}. (`undated_ids`, `icons`, `inbox_tasks`
+         and `last_synced` were added later, a file without them is fine.)
         Old format (no "version") was written by jsonpickle: the set of IDs is wrapped as {"py/set": [...]},
         the timestamp may be called `date_at`.
         """
@@ -1929,6 +2019,9 @@ class Cache:
         if not isinstance(undated, list):
             undated = []
         last_fetched = raw.get("last_fetched", raw.get("date_at", 0))
+        last_synced = raw.get("last_synced", 0)
+        if not isinstance(last_synced, (int, float)) or isinstance(last_synced, bool):
+            last_synced = 0
         if not isinstance(ids, list) or not isinstance(lists, dict) or \
                 not isinstance(last_fetched, (int, float)) or isinstance(last_fetched, bool):
             return None, False
@@ -1938,7 +2031,7 @@ class Cache:
                 "icons": {k: v for k, v in icons.items() if isinstance(k, str) and isinstance(v, str)},
                 "inbox_tasks": {k: v for k, v in inbox_tasks.items() if isinstance(v, dict)
                                 and isinstance(v.get("id"), str) and isinstance(v.get("title"), str)},
-                "last_fetched": last_fetched}, migrated
+                "last_fetched": last_fetched, "last_synced": last_synced}, migrated
 
     def save(self):
         data = {"version": CACHE_SCHEMA_VERSION,
@@ -1947,7 +2040,8 @@ class Cache:
                 "lists": self.lists,
                 "icons": self.icons,
                 "inbox_tasks": self.inbox_tasks,
-                "last_fetched": self.last_fetched}
+                "last_fetched": self.last_fetched,
+                "last_synced": self.last_synced}
         tmp = self._path.with_name(self._path.name + ".tmp")
         tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
         tmp.replace(self._path)  # atomic, so that a concurrent reader never sees half a file

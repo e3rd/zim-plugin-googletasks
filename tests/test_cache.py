@@ -15,6 +15,7 @@ def test_roundtrip(gt, cache_path):
     cache.icons = {"Work": "💼"}
     cache.undated_ids = {"u"}
     cache.inbox_tasks = {"e1": {"id": "t1", "title": "Alpha", "in_page": True}}
+    cache.last_synced = 1700000000.5
     cache.touch_save()
     data = json.loads(cache_path.read_text())
     assert data["version"] == gt.CACHE_SCHEMA_VERSION
@@ -27,6 +28,7 @@ def test_roundtrip(gt, cache_path):
     assert loaded.icons == {"Work": "💼"}
     assert loaded.undated_ids == {"u"}
     assert loaded.inbox_tasks == {"e1": {"id": "t1", "title": "Alpha", "in_page": True}}
+    assert loaded.last_synced == 1700000000.5
 
 
 def test_old_jsonpickle_format_is_migrated_and_resaved(gt, cache_path):
@@ -37,6 +39,7 @@ def test_old_jsonpickle_format_is_migrated_and_resaved(gt, cache_path):
     assert cache.lists == {"Work": "id1"}
     assert cache.last_fetched == 1234.5
     assert cache.undated_ids == set()
+    assert cache.last_synced == 0
     assert json.loads(cache_path.read_text())["version"] == gt.CACHE_SCHEMA_VERSION
     assert gt.Cache(cache_path).load().items_ids == {"a", "b"}  # second load reads the new format
 
@@ -73,3 +76,19 @@ def test_reloads_when_another_process_rewrites_the_file(gt, cache_path):
     import os
     os.utime(cache_path, (1, 1))  # make the mtime differ even on coarse filesystems
     assert reader.load().items_ids == {"a", "b"}
+
+
+def test_file_without_last_synced_loads(gt, cache_path):
+    """ Written before the incremental status sync: no cursor yet, the next sync is a full one. """
+    cache_path.write_text(json.dumps({"version": 1, "items_ids": ["a"], "lists": {}, "last_fetched": 5}))
+    cache = gt.Cache(cache_path).load()
+    assert cache.items_ids == {"a"} and cache.last_fetched == 5
+    assert cache.last_synced == 0
+
+
+@pytest.mark.parametrize("value", ["yesterday", True, None, [1]])
+def test_bad_last_synced_is_dropped(gt, cache_path, value):
+    cache_path.write_text(json.dumps({"version": 1, "items_ids": ["a"], "last_fetched": 5, "last_synced": value}))
+    cache = gt.Cache(cache_path).load()
+    assert cache.items_ids == {"a"}
+    assert cache.last_synced == 0
