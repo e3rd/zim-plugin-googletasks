@@ -1524,11 +1524,14 @@ class GoogletasksController:
         icons = []
         items_ids = set()
         undated_ids = set()
+        # The cache knows the tasks of the last response only: one completed on the server drops out of it
+        # and, uncompleted there later, would come as a new one – while its line is still on the page.
+        on_page = set() if all_history else set(on_main(self.page_tasks))
         for item, list_id, icon in items:
             # the task ID, not the etag, which changes with anything (even the position in the list);
             # `or item["etag"]` keeps the caches of older versions working
             already_imported = item["id"] in self.cache.items_ids or item["etag"] in self.cache.items_ids \
-                or item["id"] in self.cache.undated_ids
+                or item["id"] in self.cache.undated_ids or item["id"] in on_page
             # every task returned, also the past-due ones: the next import (due_min = the midnight of this one)
             # gets them again; the set stays bounded, it is rebuilt from one response each time
             (items_ids if item.get("due") else undated_ids).add(item["id"])

@@ -167,6 +167,25 @@ def test_remembers_every_returned_task_so_past_due_ones_are_not_reimported(gt, m
     assert c.notebook.page.parsed is None
 
 
+def test_task_already_on_the_page_is_not_imported_again(gt, monkeypatch):
+    """ Completed on the server, a task drops out of the response and so of the cache;
+        uncompleted there later, it comes back as unknown – its line is still on the page. """
+    cache = FakeCache()
+    c = make_controller(gt, monkeypatch, [item("a", "Alpha"), item("b", "Beta")], cache,
+                        page_lines=("Home\n", "\n", "\t[*] [[gtasks://@default/a|✋]] Alpha\n"))
+    c.fetch(force=True)
+    assert c.notebook.page.parsed.count("Alpha") == 1
+    assert "Beta" in c.notebook.page.parsed
+    assert cache.items_ids == {"a", "b"}
+
+
+def test_all_history_reimports_tasks_on_the_page_too(gt, monkeypatch):
+    c = make_controller(gt, monkeypatch, [item("a", "Alpha")], FakeCache(),
+                        page_lines=("Home\n", "\n", "[ ] [[gtasks://@default/a|✋]] Alpha\n"))
+    c.fetch(all_history=True)
+    assert c.notebook.page.parsed.count("Alpha") == 2
+
+
 def test_all_history_reimports_everything(gt, monkeypatch):
     cache = FakeCache(items_ids={"a"})
     c = make_controller(gt, monkeypatch, [item("a", "Alpha")], cache)
