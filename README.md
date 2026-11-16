@@ -1,6 +1,14 @@
 # Google tasks plugin for Zim Wiki
 Connects [Zim Wiki](https://zim-wiki.org/) to your Google Tasks lists – the default one, or several at once, each marked by its own icon. Append today's tasks to your Home file. Every task should be imported only once. If you change the tasks, you can upload it back to Google server. If you complete it, the completion should propagate back as well.
 
+![Tasks of three Google Tasks lists imported into a Zim page](assets/page.png)
+
+* Due tasks come into a page of your notebook as checkboxes – on Zim startup, from the menu or from cron. The icon (✋ 💼 🛒) tells the lists apart and opens the task in Google Tasks.
+* Tick a checkbox in Zim and the task is completed on the server; complete it on the phone and it gets ticked in Zim.
+* Turn any line into a Google Task, or postpone one, with a single shortcut.
+* A task assigned from a Google Doc or Chat, or made of an e-mail or a Keep note, links to where it comes from (📄↗ 💬↗ 📧↗ 📝↗).
+* Optional [inbox calendar](#inbox-calendar-tasks-from-your-phones-calendar-or-claude-optional-off-by-default) 📥: add tasks from anything that can create a calendar event.
+
 ## Installation
 Same as for the other plugins, but needs some Google Tasks API dependencies. Python3.6+ required.
 * Run `python3 install.py` — installs the pip dependencies and copies `googletasks.py`, `_lib/zim_page_content.py` and `googletasks_client_id.json` into Zim's plugins folder for you.
@@ -12,9 +20,16 @@ Same as for the other plugins, but needs some Google Tasks API dependencies. Pyt
     * something like `%appdata%\zim\data\zim\plugins` in Win, or `~/.local/share/zim/plugins/` in Linux
     * **all three files go directly into that folder** – `zim_page_content.py` must end up next to `googletasks.py`, *not* in a `_lib` subfolder. Zim loads plugins as submodules of `zim.plugins`, so a misplaced helper makes the import fail – and Zim swallows that error, silently disabling the whole plugin (no tasks imported, no checkbox sync, no traceback; look for `No such plugin: googletasks` in the log)
 * You enable the plugin in `Zim / Edit / Preferences / Plugins` : check mark Google tasks.
-* Choose your preferences at `Zim / File / Properties / Google Tasks`
+* Go to `Tools / Google Tasks / Import new tasks` – the first time, the browser asks for the access to your Google Tasks
+* Enjoy
+
+## Settings
+Choose your preferences at `Zim / File / Properties / Google Tasks` (per notebook):
+
+![Notebook properties of the plugin](assets/properties.png)
+
+* Preferences
     * Import new tasks on Zim startup?
-    * Sync current tasks status before import automatically? (May take a long time.)
     * Page to be updated (empty = homepage)
     * Task lists to import (empty = default task list) – comma separated titles, each optionally with an icon: `My Tasks, Work=💼`. Lists without an icon get one from the palette ✋ 💼 🏠 🛒 📚 ⭐ 🔧 🎯. The first list is where new tasks go by default. A single title (as in older versions) still works.
         * You can also check the lists in `Tools / Google Tasks / Task lists` (`Refresh task lists` loads them from the server); that edits this field for you, and the menu follows whatever you write here. Use the field to reorder the lists or pick the icons.
@@ -22,9 +37,19 @@ Same as for the other plugins, but needs some Google Tasks API dependencies. Pyt
     * Import tasks assigned to me from Google Docs or Chat (default on)
     * A task gets a link before its title leading to where it comes from: 📄↗ document, 💬↗ Chat space, 📧↗ e-mail, 📝↗ Keep note (put the caret between the icon and the arrow and press Enter to open it)
     * Include start date – if true, when imported, tasks receive little **[start date](https://www.zim-wiki.org/manual/Plugins/Task_List.html)** string, ex: ">2021-01-01", and when you create a task from cursor or selection, this start time is pre-filled
-* Go to `Tools / Google Tasks / Import new tasks` which imports current tasks that have not been yet imported before
-    * When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched. If you need to import all history (e.g. after deleting the tasks from the page by mistake), use `Tools / Google Tasks / Import all non-completed even already imported tasks from the past` – it imports again every non-completed task, already imported ones too.
-* Enjoy
+    * Which postponing buttons the task dialog offers (see below)
+
+## Usage
+Everything is in `Tools / Google Tasks`:
+
+![Tools / Google Tasks menu with the task lists](assets/menu.png)
+
+* `Import new tasks` imports current tasks that have not been yet imported before
+    * When run for the first time, only tasks with today's due date are imported. Other times, all the tasks between current today and the day of the last import are fetched. If you need to import all history (e.g. after deleting the tasks from the page by mistake), use `Import all non-completed even already imported tasks from the past` – it imports again every non-completed task, already imported ones too.
+* `Task lists` – check the lists to import
+* `Task from cursor or selection` (Ctrl+Alt+Shift+G) takes the line under the caret (with the lines of notes below it) into a dialog and sends it to Google Tasks: a plain line becomes a new task, a Google Task is updated. The buttons set the due date and submit at once – a quick way to postpone a task; it then leaves the page and comes back with the import when due. `Add new task` opens the same dialog empty.
+
+![Dialog updating a task, with the postponing buttons](assets/dialog.png)
 
 ### Own Google client secret (optional)
 By default the plugin uses the bundled `googletasks_client_id.json`. If it hits the Google API quota, create your own OAuth client (type "Desktop app", Tasks API enabled) and point the plugin to its json – the bundled file stays untouched:
@@ -70,9 +95,6 @@ The plugin touches Zim internals, so the exact Zim version matters. The one diff
 
 ### Multiple Zim instances
 Every Zim notebook can use independent task list. If they use the same list, any task will be imported into both.
-
-## One image for hundred words
-![Demonstration](example.png?raw=true)
 
 ## Missing feature?
 Feel free to tell me in the issues what you'd like it to do.
