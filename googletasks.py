@@ -650,7 +650,7 @@ class GoogletasksWindow(MainWindowExtension):
         )
         MainWindowExtension.__init__(self, plugin, window)  # super(WindowExtension, self).__init__(*args, **kwargs)
 
-        if self.plugin.preferences['startup_check']:
+        if controller.preferences['startup_check']:  # of the notebook, not the global default of the plugin
             controller.import_and_sync()
 
     def _add_actions(self, uimanager):
