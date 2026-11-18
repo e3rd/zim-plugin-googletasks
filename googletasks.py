@@ -4,12 +4,14 @@ from __future__ import annotations
 import base64
 import binascii
 import datetime
+import errno
 import html
 import json
 import logging
 import os
 import queue
 import re
+import socket
 import sys
 import threading
 from pathlib import Path
@@ -20,7 +22,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 import dateutil.parser
 import httplib2
 from dateutil.relativedelta import relativedelta
-from gi.repository import GLib, Gtk
+from gi.repository import Gio, GLib, Gtk
 from googleapiclient import discovery
 from googleapiclient.errors import Error, HttpError
 from oauth2client import client, tools
@@ -149,10 +151,13 @@ HTTP_TIMEOUT = 30
 "seconds; without it, a dead network would keep a job (and the jobs queued after it) waiting forever"
 NETWORK_ERRORS = (httplib2.ServerNotFoundError, OSError, Error)
 "no network, a timeout (OSError), an error answer of Google"
+OFFLINE_ERRNOS = {errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTUNREACH}
 API_VERSIONS = {"tasks": "v1", "calendar": "v3"}
 TASKS_MISSING = "Google Tasks access not granted yet – add a task from Zim once to grant it"
 BUSY_SUFFIX = " ⟳ Google Tasks"
 "appended to the window title while the jobs talking to Google run"
+OFFLINE_SUFFIX = " ⚠ Google Tasks offline"
+"appended to the window title since a request failed for no connection, until one succeeds"
 INBOX_ICON = "📥"
 "marks the plain Zim tasks imported from the inbox calendar"
 INBOX_CALENDAR_TITLE = "Zim inbox"
@@ -443,7 +448,7 @@ class GoogleApi:
         credentials = self.get_credentials(credential_path, scope, claim)
         if not credentials:
             raise LookupError(missing)
-        http = credentials.authorize(httplib2.Http(timeout=HTTP_TIMEOUT))
+        http = credentials.authorize(OnlineHttp(self.controller, timeout=HTTP_TIMEOUT))
         return discovery.build(api, API_VERSIONS[api], http=http)
 
     def get_credentials(self, credential_path, scope, claim=True):
@@ -464,6 +469,20 @@ class GoogleApi:
         return credentials
 
 
+class OnlineHttp(httplib2.Http):
+    """ Tells the controller that Google answers, which ends its offline state (see set_offline). """
+
+    def __init__(self, controller, **kwargs):
+        super().__init__(**kwargs)
+        self.controller = controller
+
+    def request(self, *args, **kwargs):
+        response = super().request(*args, **kwargs)
+        if self.controller.offline:
+            self.controller.set_offline(False)
+        return response
+
+
 def monkeypatch_method(cls):
     """ Decorator used for extend features of a method
         If it seems the methods has been already monkey patched (func.__name__ + "_original" exists), it does nothing.
@@ -476,6 +495,27 @@ def monkeypatch_method(cls):
         return func
 
     return decorator
+
+
+def is_offline_error(exc):
+    """ True if the exception (or the one it was raised from) means there is no connection to Google:
+        no DNS, no route, a timeout. Not an answer of Google (HttpError) – that one is a real problem. """
+    while exc is not None:
+        if isinstance(exc, (httplib2.ServerNotFoundError, ConnectionError, TimeoutError, socket.gaierror)) \
+                or isinstance(exc, OSError) and exc.errno in OFFLINE_ERRNOS:
+            return True
+        exc = getattr(exc, "__cause__", None)  # (a message made of it is a str, see disabled_api_message)
+    return False
+
+
+def network_available():
+    """ False if the system knows it has no network (no default route), so that there is no point asking Google.
+        True if it cannot tell. """
+    try:
+        return Gio.NetworkMonitor.get_default().get_network_available()
+    except Exception as e:  # no GIO network monitor here
+        logger.debug("Cannot ask the network monitor: %s", e)
+        return True
 
 
 def on_main(fn, *args):
@@ -522,9 +562,9 @@ class Worker:
     A job does the network part itself and hands the GTK part (the page, dialogs) over by on_main().
     One at a time, in order: they share the cache and the page, and a checkbox ticked during
     an import must not overtake it. A named job (an import) is not queued again while it is queued or running.
-    While there are jobs, the window title gets BUSY_SUFFIX (Zim 0.75 has no status bar); when Zim rewrites
-    the title (another page opened – also the very first one, after the startup import has been queued),
-    the suffix is put back.
+    While there are jobs, the window title gets BUSY_SUFFIX (Zim 0.75 has no status bar), while offline
+    OFFLINE_SUFFIX; when Zim rewrites the title (another page opened – also the very first one, after
+    the startup import has been queued), the suffixes are put back.
     """
 
     def __init__(self, window, on_error):
@@ -536,8 +576,10 @@ class Worker:
         self.count = 0
         "jobs queued or running; changed in the main thread only"
         self.names = set()
+        self.offline = False
+        "shown in the title, see GoogletasksController.set_offline"
         if hasattr(window, "connect"):
-            window.connect("notify::title", lambda *_: self.count and self._busy(True))
+            window.connect("notify::title", lambda *_: (self.count or self.offline) and self._title())
 
     def submit(self, job, name=None):
         """ Queue the job. Returns False if a job of this name is queued or running already. """
@@ -548,7 +590,7 @@ class Worker:
             self.names.add(name)
         self.count += 1
         if self.count == 1:
-            self._busy(True)
+            self._title()
         self.queue.put((job, name))
         if not self.thread:
             self.thread = threading.Thread(target=self._run, name="googletasks", daemon=True)
@@ -574,14 +616,20 @@ class Worker:
         self.names.discard(name)
         self.count -= 1
         if not self.count:
-            self._busy(False)
+            self._title()
         return False
 
-    def _busy(self, busy):
+    def set_offline(self, offline):
+        self.offline = offline
+        self._title()
+
+    def _title(self):
         try:
             current = self.window.get_title() or ""
-            title = current.replace(BUSY_SUFFIX, "")
-            if busy:
+            title = current.replace(BUSY_SUFFIX, "").replace(OFFLINE_SUFFIX, "")
+            if self.offline:
+                title += OFFLINE_SUFFIX
+            if self.count:
                 title += BUSY_SUFFIX
             if title != current:  # (setting it again would notify again, see __init__)
                 self.window.set_title(title)
@@ -1076,6 +1124,12 @@ class GoogletasksNewTaskDialog(Dialog):
 
 
 class GoogletasksController:
+    offline = False
+    "since a request failed for no connection (or the system had no network), until a request succeeds"
+    offline_errors = 0
+    "the errors for no connection so far: a step that raised the number failed for it, the next ones are skipped"
+    dialog_open = False
+    "an ErrorDialog is shown, another error is only logged then – no pile of dialogs"
 
     def __init__(self, window: MainWindow | None = None, notebook=None, preferences=None):
         self.window = window
@@ -1230,7 +1284,7 @@ class GoogletasksController:
             if isinstance(e, HttpError) and e.resp.status in (404, 410):  # deleted on the server, nothing to revert to
                 self.error(f"Task {task_id} is not on the server any more", e)
                 return None
-            self.error("Cannot un/check the task", e)
+            self.error("Cannot un/check the task", e, quiet_offline=False)  # the checkbox is reverted, say why
             return False
         self.info(f'Marked as {task["status"]}')
         return True
@@ -1265,7 +1319,7 @@ class GoogletasksController:
             self.error("Cannot submit the task", e)
             return False
         except Exception as e:
-            self.error("Error in communication while submitting", e)
+            self.error("Error in communication while submitting", e, quiet_offline=False)  # the task would be lost
             return False
         return True
 
@@ -1288,28 +1342,64 @@ class GoogletasksController:
         """ Log the text (Zim 0.74+ has no status bar to show it in). """
         logger.info("[Googletasks] " + str(text))
 
-    def error(self, msg, exc=None, fatal=False):
+    def error(self, msg, exc=None, fatal=False, quiet_offline=True):
         """ Report a problem so that somebody notices it (unlike a bare `logger.error`).
 
         Always logged. In the GUI it goes to the status bar if this Zim has one; a `fatal` error
-        (or any error when there is no status bar, which Zim 0.74+ lacks) opens an ErrorDialog.
-        Headless (`zim --plugin googletasks`) it is written to stderr and marks the controller
-        as `failed`, which makes the command exit with a non-zero code.
+        (or any error when there is no status bar, which Zim 0.74+ lacks) opens an ErrorDialog,
+        unless one is open already. Headless (`zim --plugin googletasks`) it is written to stderr and marks
+        the controller as `failed`, which makes the command exit with a non-zero code.
+
+        No connection (is_offline_error) is not a failure: working offline, the startup import and every cron run
+        would open a dialog. It sets the offline state (the window title shows it) and goes to the status bar
+        at most; headless just to the log. :param quiet_offline: False for what the user has just done
+        (a tick that is going to be reverted), it is reported as any error.
         """
         if threading.current_thread() is not threading.main_thread():
-            return on_main(self.error, msg, exc, fatal)
+            return on_main(self.error, msg, exc, fatal, quiet_offline)
         exc = disabled_api_message(exc) or exc
         text = f"{msg}: {exc}" if exc else str(msg)
+        statusbar = getattr(self.window, "statusbar", None)
+        if is_offline_error(exc):
+            self.offline_errors += 1
+            self.set_offline(True)
+            if quiet_offline:
+                logger.info("[Googletasks] Offline: %s", text)
+                if statusbar is not None:
+                    statusbar.push(0, "[Googletasks] " + text)
+                return
+        else:
+            self.failed = True
         logger.error("[Googletasks] %s", text, exc_info=exc if isinstance(exc, BaseException) else None)
-        self.failed = True
         if not self.window:
             print(f"[Googletasks] ERROR: {text}", file=sys.stderr)
             return
-        statusbar = getattr(self.window, "statusbar", None)
         if statusbar is not None and not fatal:
             statusbar.push(0, "[Googletasks] " + text)
-        elif ErrorDialog:
-            ErrorDialog(self.window, ("Google Tasks: " + str(msg), str(exc) if exc else "")).run()
+        elif ErrorDialog and not self.dialog_open:
+            self.dialog_open = True  # the dialog runs its own loop, where the next job may report again
+            try:
+                ErrorDialog(self.window, ("Google Tasks: " + str(msg), str(exc) if exc else "")).run()
+            finally:
+                self.dialog_open = False
+
+    def set_offline(self, offline):
+        """ Enter or leave the offline state (see `offline`), shown in the window title. """
+        if offline == self.offline:
+            return
+        self.offline = offline
+        logger.info("[Googletasks] %s", "Offline, Google cannot be reached" if offline else "Online again")
+        if self.worker:
+            on_main(self.worker.set_offline, offline)
+
+    def connected(self):
+        """ False if the system has no network at all: a job then skips quietly, instead of asking Google
+            and failing (and waiting for the timeout first). The offline state is set then. """
+        if on_main(network_available):
+            return True
+        logger.info("[Googletasks] No network, Google Tasks not asked")
+        self.set_offline(True)
+        return False
 
     def _read_service(self, info):
         """ Service for reading. In case of an error, informs user and raises LookupError. """
@@ -1357,6 +1447,7 @@ class GoogletasksController:
             service = self._read_service("Reading task lists")
         items = []
         failures = 0
+        offline_errors = self.offline_errors
         for title, icon in self.tasklists:
             try:
                 list_id = self.list_id(title)
@@ -1368,6 +1459,8 @@ class GoogletasksController:
             except LookupError as e:
                 if e.args:  # list_id() failure, the others are reported already
                     self.error("Cannot read the task list", e)
+                if offline_errors != self.offline_errors:  # no connection, the other lists would only wait and fail
+                    raise LookupError from e
                 failures += 1
         if failures == len(self.tasklists):
             raise LookupError
@@ -1484,7 +1577,10 @@ class GoogletasksController:
         if all_history:
             force = True
         # independent of the tasks, it is not throttled: the inbox should not wait
+        offline_errors = self.offline_errors
         self.import_inbox_calendar()
+        if offline_errors != self.offline_errors:  # no connection, the tasks would only fail the same
+            return
 
         # Set the date since that we fetch the tasks
         cache_exists = self.cache.exists()
@@ -1783,16 +1879,21 @@ class GoogletasksController:
     def import_and_sync(self, force=False, all_history=False):
         """ Queue the import (see fetch), then the incremental status sync, also when the import is throttled:
             the sync is cheap. A failing sync leaves the import be, it is a job of its own. After an import
-            that failed, the sync is left for the next time: offline, it would only report the same again. """
+            that failed (or found no connection), the sync is left for the next time: it would only fail again.
+            Without network, neither asks Google. """
         before = self.page_tasks()  # see queue_sync
         imported = [True]
 
         def job():
+            if not self.connected():
+                imported[0] = False
+                return
             failed, self.failed = self.failed, False
+            offline_errors = self.offline_errors
             try:
                 self.fetch(force=force, all_history=all_history)
             finally:
-                imported[0] = not self.failed
+                imported[0] = not self.failed and offline_errors == self.offline_errors
                 self.failed = self.failed or failed
 
         self.background(job, "import")
@@ -1813,6 +1914,8 @@ class GoogletasksController:
         :param before: page_tasks() taken when the sync was queued; a checkbox changed since is left as is
         :return: True if done completely
         """
+        if not self.connected():
+            return False
         self.cache.load()
         full = full or not self.cache.last_synced
         cursor = time()  # taken before asking: what changes meanwhile is asked for again next time
@@ -1864,8 +1967,11 @@ class GoogletasksController:
                 if isinstance(e, HttpError) and e.resp.status in (404, 410):  # deleted, must not block the cursor
                     logger.warning("[Googletasks] Task list %s not on the server any more: %s", list_id, e)
                     continue
+                offline_errors = self.offline_errors
                 self.error("Cannot sync tasks status", e)
                 complete = False
+                if offline_errors != self.offline_errors:  # no connection, the other lists would fail the same
+                    break
         return statuses, complete
 
     def _read_statuses(self, service, before):

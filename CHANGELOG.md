@@ -1,4 +1,5 @@
 # Unreleased
+* enh: working offline no longer piles up error dialogs: no connection is not reported as an error, the window title shows `⚠ Google Tasks offline` until Google answers again; without network the import and sync do not even try, with the network down they stop at the first request; a headless run (cron) offline exits with 0, quietly; at most one error dialog is open at a time
 * fix: `Import new tasks on Zim startup` unchecked in the notebook properties was ignored, the import ran anyway
 
 # 1.3.1 (2026-11-16)
